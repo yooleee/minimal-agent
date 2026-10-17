@@ -40,10 +40,6 @@ def swebench_image_name(instance_id: str) -> str:
         scheme; "__" is not allowed in Docker repo names, so it is encoded as
         "_1776_". Centralizing the rule means one place to fix if it changes.
     """
-    # TODO 1: replace "__" with "_1776_" in instance_id
-    # TODO 2: format into "docker.io/swebench/sweb.eval.x86_64.{id}:latest"
-    # TODO 3: lowercase the whole string (Docker repository names must be lowercase)
-
     formatted_instance_id = instance_id.replace("__", "_1776_")
     image_reference = f"docker.io/swebench/sweb.eval.x86_64.{formatted_instance_id}:latest"
     return image_reference.lower()
@@ -99,10 +95,6 @@ class DockerEnvironment:
             Separating construction from side effects keeps objects cheap to
             build and test, and makes start() the single place setup can fail.
         """
-        # TODO 1: store every argument on self (copy env into a new dict; default {})
-        # TODO 2: initialize self.container_name = None and self.container_id = None
-        #         (None means "not started"; cleanup() and execute() check these)
-
         self.image = image
         self.cwd = cwd
         self.timeout = timeout
@@ -133,18 +125,6 @@ class DockerEnvironment:
             The container must outlive individual commands so file edits persist
             across steps; a no-op long-running process keeps it alive.
         """
-        # TODO 1: if self.container_id is not None, raise RuntimeError (double start)
-        # TODO 2: generate a unique name, e.g. f"{prefix}-{uuid.uuid4().hex[:8]}",
-        #         and store it on self.container_name BEFORE calling docker
-        #         (so cleanup() can remove it even if `docker run` half-succeeds)
-        # TODO 3: build argv: docker run -d --name <name> -w <cwd>
-        #         [platform flag if you need one] <image> sleep infinity
-        # TODO 4: subprocess.run(argv, capture stdout+stderr as text,
-        #         timeout=start_timeout, check=False)
-        # TODO 5: on subprocess.TimeoutExpired -> raise RuntimeError(...) from e
-        # TODO 6: on returncode != 0 -> raise RuntimeError including stderr
-        # TODO 7: store stdout.strip() as self.container_id
-
         if self.container_id is not None:
             raise RuntimeError("Container already started.")
 
@@ -203,12 +183,6 @@ class DockerEnvironment:
             Docker. The in-container `timeout` is what actually kills a runaway
             process; killing the host-side `docker exec` client does not.
         """
-        # TODO 1: start with ["docker", "exec", "-w", self.cwd]
-        # TODO 2: for each key, value in self.env, append "-e", f"{key}={value}"
-        # TODO 3: append self.container_id
-        # TODO 4: append "timeout", f"--kill-after={self.kill_after}", str(self.timeout)
-        # TODO 5: append "bash", "-c", command  (command stays ONE argv element)
-
         if self.container_id is None:
             raise RuntimeError("Container not started, call start() first.")
 
@@ -244,18 +218,6 @@ class DockerEnvironment:
             unchanged. Both timeout paths are unified into one exception type
             so the Agent has a single thing to catch.
         """
-        # TODO 1: if self.container_id is None, raise RuntimeError("call start() first")
-        # TODO 2: subprocess.run(self._docker_exec_argv(command), text=True,
-        #         encoding="utf-8", errors="replace", stdout=PIPE, stderr=STDOUT,
-        #         timeout=self.timeout + self.kill_after + self.host_grace,
-        #         check=False). Let a host-side TimeoutExpired propagate as-is.
-        # TODO 3: if returncode == TIMEOUT_EXIT_CODE, raise
-        #         subprocess.TimeoutExpired(cmd=command, timeout=self.timeout,
-        #         output=result.stdout)
-        #         DECIDE: also treat 137 (escalated to KILL) as a timeout? It is
-        #         ambiguous with OOM / kill -9. Document whichever you choose.
-        # TODO 4: return {"output": result.stdout, "returncode": result.returncode}
-
         result = subprocess.run(
             self._docker_exec_argv(command),
             text=True,
@@ -290,14 +252,6 @@ class DockerEnvironment:
             original exception. Removal is by name, which exists even when
             `docker run` never returned an ID.
         """
-        # TODO 1: if self.container_name is None, return (nothing was attempted)
-        # TODO 2: subprocess.run(["docker", "rm", "-f", name], capture output,
-        #         timeout=60, check=False)
-        # TODO 3: catch TimeoutExpired / OSError; print a warning instead of raising
-        # TODO 4: on nonzero returncode, print a warning (container may need manual rm)
-        # TODO 5: reset self.container_name and self.container_id to None (idempotent)
-
-
         if self.container_name is None:
             return
 
@@ -345,8 +299,6 @@ class LocalEnvironment:
         Why:
             Lets you exercise the agent loop without Docker (fast local debugging).
         """
-        # TODO: store args on self (copy env into a new dict; default {})
-
         self.cwd = cwd
         self.timeout = timeout
         self.env = {} if env is None else dict(env)
@@ -361,7 +313,6 @@ class LocalEnvironment:
         Why:
             run_single.py calls start()/cleanup() unconditionally.
         """
-        # TODO: nothing to do (leave as a deliberate no-op with a comment)
 
     def execute(self, command: str) -> dict:
         """
@@ -380,13 +331,6 @@ class LocalEnvironment:
             Mirrors DockerEnvironment.execute so Agent needs no branching.
             Known limitation: on timeout, grandchild processes may survive.
         """
-        # TODO 1: merged_env = {**os.environ, **self.env}  (host env + overrides)
-        # TODO 2: subprocess.run(["bash", "-c", command], cwd=self.cwd,
-        #         env=merged_env, text=True, encoding="utf-8", errors="replace",
-        #         stdout=PIPE, stderr=STDOUT, timeout=self.timeout, check=False)
-        #         Let TimeoutExpired propagate.
-        # TODO 3: return {"output": result.stdout, "returncode": result.returncode}
-
         merged_env = {**os.environ, **self.env}
 
         result = subprocess.run(
@@ -414,4 +358,3 @@ class LocalEnvironment:
         Why:
             Uniform lifecycle across environments.
         """
-        # TODO: nothing to do
