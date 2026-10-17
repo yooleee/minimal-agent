@@ -1,0 +1,79 @@
+# TODO (Step 4a): reshape and fix this file. Target layout (four top-level sections;
+#   environment and model are NOT agent settings, so they stop being nested under agent):
+#
+#     dataset:      name: princeton-nlp/SWE-bench_Verified, split: test
+#     model:        name: gpt-5.6-luna
+#     agent:        max_steps, max_format_errors, output_limit, head_chars, tail_chars,
+#                   system_template, instance_template
+#     environment:  cwd, timeout, env (BASH_ENV, PAGER, MANPAGER)
+#
+#   Content fixes:
+#   - copy both prompts from the CURRENT Python strings (class_agent.system_prompt and
+#     run_single.TASK_TEMPLATE), which are the versions you've been running. This file's
+#     copies are older: "Here is  Here is", "30 seconds", sympy hardcoded, {problem}.
+#   - in system_template, replace the numbers with placeholders:
+#       {timeout}        (filled from environment.timeout: the one-source-of-truth point)
+#       {output_limit:,} / {head_chars:,} / {tail_chars:,}  (`:,` prints 10000 as 10,000)
+#   - instance_template uses {repo} and {problem_statement}, as in TASK_TEMPLATE
+#   - add MANPAGER: cat to environment.env (missing here)
+#   - inside a `|` block, YAML strips the FIRST line's indentation from every line, and any
+#     extra indentation is kept. The current file indents the bullets, the code fence and
+#     <issue> deeper than their headings, so the prompt would gain stray leading spaces.
+#     Keep every line of a block at the same indentation unless you want the spaces.
+#   - never put # comments inside a `|` block: they become part of the prompt text.
+#   - literal { or } in a template would need doubling ({{ }}) for str.format; the
+#     current prompts have none. Braces inside the VALUES (e.g. code in an issue) are fine.
+
+dataset:
+  name: princeton-nlp/SWE-bench_Verified
+  split: test
+
+model:
+  name: gpt-5.6-luna
+
+agent:
+  max_steps: 50
+  max_format_errors: 5
+  output_limit: 10000
+  head_chars: 5000
+  tail_chars: 5000
+
+system_template: |
+    You are a helpful assistant that completes tasks by running bash commands.
+
+    In each reply:
+    1. Briefly explain your reasoning: what you know so far and what you will do next.
+    2. Then include exactly one bash-action block on its own lines with the command(s) to run:
+
+    ```bash-action
+    <command>
+    ```
+
+    Rules:
+    - Use exactly one bash-action block per reply. You can chain commands inside it with && or ;, or use pipes.
+    - Put the block on its own lines; end your reply immmediately after the block.
+    - Each block runs in a new shell, so directory changes and environment variables do not persist between replies. Chain them where needed, e.g. cd dir && ls.
+    - Commands time out after {timeout} seconds. Avoid interactive commands and anything that runs indefinitely.
+    - You will see the output of each command before your next reply; don't describe results until you've seen the output.
+    - Command output longer than {output_limit:,} characters is truncated: you will see only the first {head_chars:,} and last {tail_chars:,} characters. For large outputs, redirect to a file (e.g. cmd > out.txt 2>&1) and inspect it in pieces with grep -n, head, tail, or sed -n 'START,ENDp' out.txt.
+    - When the task is complete and the output is verified, reply with a block containing only: exit
+
+task_template: |
+    Here is an issue from the {repo} repository, which is located at /testbed:
+
+    <issue>
+    {problem_statement}
+    </issue>
+
+    Fix this issue by modifying non-test source files only. Do not modify tests.
+    Recommended workflow: find the relevant code, write a small script that reproduces the issue,
+    make the fix, then re-run the script to verify it. When you are done, exit.
+
+
+environment:
+  cwd: /testbed
+  timeout: 60
+  env:
+    BASH_ENV: /root/.bashrc
+    MANPAGER: cat
+    PAGER: cat

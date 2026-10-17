@@ -1,0 +1,13 @@
+# Secrets (API keys)
+.env
+
+# Virtual environment and caches
+.minimal/
+__pycache__/
+
+# Editor and OS files
+.zed/
+.DS_Store
+
+# Personal scratch notes (verification commands live in docs/progression.md)
+temp.txt
