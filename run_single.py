@@ -193,20 +193,6 @@ def run_instance(instance_id: str, config: dict) -> dict:
         One function = one evaluation unit. Batch runs (Stage 8) will call this
         in a loop; scoring (Stage 7) will consume the records it returns.
     """
-    # TODO (Step 6): extend the returned record so it holds the whole trajectory:
-    #   - "model": config["model"]["name"]   (append_prediction needs it)
-    #   - "step_count": agent.step_count
-    #   - "started_at" / "finished_at": datetime.now(timezone.utc).isoformat(),
-    #     taken just before env.start() and just before the return
-    #   - "duration_s": from time.monotonic() at the same two points.
-    #     Why monotonic and not the timestamps: the wall clock can jump (NTP sync,
-    #     sleep), and monotonic() only ever moves forward, so differences are reliable.
-    #   - "messages": agent.messages   (put it LAST so the short fields are at the top
-    #     of the .traj.json when you open it)
-    #   Imports: from datetime import datetime, timezone and import time.
-    #   Update the docstring's Returns line to list the new keys.
-    #   Note: if agent.run() raises, nothing is returned, so no trajectory is saved.
-    #   That's the Stage 8 robustness gap (an "errored" record is just another dict).
     instance = load_instance(instance_id, config["dataset"]["name"], config["dataset"]["split"])
     messages = build_messages(instance, config)
 
@@ -249,24 +235,6 @@ def main() -> None:
         Keeps the __main__ guard to one line and makes run_instance() importable
         without side effects (Stage 8's batch runner will import it).
     """
-    # TODO (Step 6): save the run to disk.
-    #   - module constant next to DEFAULT_CONFIG_PATH:
-    #       DEFAULT_OUTPUT_DIR = Path(__file__).parent / "runs"
-    #   - parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help=...)
-    #     (argparse turns "--output-dir" into args.output_dir)
-    #   - after load_config:
-    #       run_dir = make_run_dir(args.output_dir)
-    #       save_run_metadata(run_dir, config)      <- BEFORE run_instance, so a crash
-    #                                                  still leaves run.json behind
-    #   - after run_instance:
-    #       traj_path = save_trajectory(run_dir, result)
-    #       append_prediction(run_dir, result)
-    #   - replace print(result) with a short summary: instance_id, exit_status, the
-    #     patch size (len of model_patch, or "capture failed" if it's None) and
-    #     traj_path. The full record now includes every message and would flood
-    #     the terminal.
-    #   - import the four functions from handling.records
-    #   Update this docstring's Returns line (it no longer prints the record).
     parser = argparse.ArgumentParser(description = "Run one instance")
 
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="Pass the yaml config path for the agent such as: default.yaml")

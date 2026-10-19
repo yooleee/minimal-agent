@@ -11,8 +11,8 @@ Goal of the project: one SWE-bench (bash-only) instance per evaluation, run unat
 | 3 | `run_single.py`: one instance end to end, with guaranteed cleanup | Done |
 | 4 | `config/default.yaml` as the single source of run settings | Done |
 | 5 | Patch capture (`model_patch`) | Done |
-| 6 | Run record (config, messages, result) saved to disk | Next |
-| 7 | Scoring with the SWE-bench harness | Planned |
+| 6 | Run record (config, messages, result) saved to disk | Done |
+| 7 | Scoring with the SWE-bench harness | Next |
 | 8 | Robustness and batch runs | Planned |
 
 ---
@@ -257,3 +257,91 @@ Checks 1 to 3 used `LocalEnvironment` on a temporary git repo:
 - A bogus `base_commit` returns `None` with the warning `128 Patch capture failed due to fatal: bad object ...`. A timeout also returns `None`.
 
 Check 4, end to end. `run_instance` was run against Docker with a scripted LM (`Agent.query_lm` replaced, so there were no API calls) that appended one line to `sympy/core/mod.py` and then exited. The record had `exit_status: Submitted` and a `model_patch` starting with `diff --git a/sympy/core/mod.py`, and no container was left behind. A real run returned `model_patch: ''`. Capture worked, but the agent left no changes, so that run would score as unresolved.
+
+---
+
+## Step 6: Run records
+
+**Goal.** Every run leaves a folder on disk that answers what the agent did, with which settings, on which version of the harness. It also writes the predictions file that Stage 7 scores.
+
+```
+runs/                                    gitignored
+  2026-10-19T23-11-14/                   one folder per invocation (UTC timestamp)
+    run.json                             config, harness commit, Python version, argv
+    sympy__sympy-15599.traj.json         one trajectory per instance
+    preds.jsonl                          one prediction line per instance
+```
+
+### Design decisions
+
+- **The save functions live in `handling/records.py`, not `run_single.py`.** `run_single.py` may be replaced once batch runs exist (Stage 8), and the batch runner needs the same functions with one shared `run_dir`.
+- **`run_instance` returns data, and `main()` writes the files.** `run_instance` stays testable without touching the disk.
+- **JSON and JSONL from the standard library.** Messages are arbitrary text, and JSON escapes it safely. Revisit YAML only if a concrete need appears.
+  - `run.json` and the trajectories use `indent=2` for reading by eye.
+  - `preds.jsonl` has one record per line with no indent. A batch that crashes halfway keeps every line already written.
+  - `ensure_ascii=False` keeps non-ASCII text readable, and `encoding="utf-8"` makes that safe on Windows.
+- **`json.dump` vs `json.dumps`.** `dump` writes straight into an open file and suits a file holding one document. `dumps` returns a string, which `append_prediction` needs so it can add the newline itself. Calling a json function on that string again would double-encode it into one quoted string.
+- **Nothing is silently overwritten.** `make_run_dir` uses `mkdir(exist_ok=False)`, and the trajectory and `run.json` open with mode `"x"`. The shared `runs/` parent uses `exist_ok=True`, and `preds.jsonl` uses append mode `"a"` on purpose.
+- **Folder names use UTC with hyphens in the time** (`%Y-%m-%dT%H-%M-%S`). A colon is not allowed in Windows file names, and the format sorts alphabetically in time order.
+- **`run.json` is written before `run_instance`**, so a crashed run still records its config and harness version. It saves the config values, not the YAML path, because the file can change later.
+- **The harness version is `{"commit", "dirty"}`.** A shared helper `_run_git` returns `None` when git fails or cannot run (nonzero exit, `OSError`, `TimeoutExpired`). That keeps three states apart: a clean tree (`False`), uncommitted edits (`True`), and "could not check" (`None`). A missing version stamp never stops a run.
+- **Two clocks.** `started_at` and `finished_at` are ISO 8601 UTC strings (`2026-10-19T23:05:54.029802+00:00`, biggest unit first) that record when the run happened. `duration_s` is the difference between two `time.monotonic()` readings, because the wall clock can jump (time sync, sleep) and a monotonic clock only moves forward.
+- **`preds.jsonl` keeps `model_patch: null` when capture failed.** It is not turned into `""`, which would erase "failed" vs. "no changes". How the SWE-bench harness treats `null` is checked in Stage 7.
+- **`main()` prints a one-line summary**, not the full record (which now holds every message). A failed capture prints `Capture failed` instead of a character count.
+- **Known gap.** If `agent.run()` raises, `run_instance` returns nothing, so only `run.json` is written. Recording an errored run is Stage 8 work. The save functions take a plain dict, so an error record fits the same seam.
+- **Deferred.** Token usage and cost need `query_lm` to read `response.usage`.
+
+### Bugs found in review
+
+- **`_harness_git_state`:**
+  - No `try/except`, so a missing git raised `FileNotFoundError` and would have stopped the run. "Don't raise" means catch and convert, not leave the exception handling out.
+  - `dirty` was decided by empty stdout. A clean tree became `None` ("could not check"), and a dirty tree stored git's whole output instead of `True`. The fix decides by returncode first, then by output.
+  - The returned keys (`Commit`, `messy_status`) did not match the docstring (`commit`, `dirty`).
+- **`append_prediction`:**
+  - The leftover `raise NotImplementedError` ran after the line was written.
+  - `"model_name_or_patch"` was a typo of the harness key `"model_name_or_path"`. It would only have failed at scoring time.
+- **The summary print:**
+  - `"..." if None else len(...)` tested the literal `None`, which is always false, so a failed capture crashed on `len(None)`.
+  - The next version, `len(x) is None`, called `len` before the test, and `len` never returns `None`.
+  - A `result['nstance_id']` typo raised `KeyError` on every run.
+- **Docstrings:** the `run_instance` docstring briefly contained a pasted copy of the `return` dict, and listed the timestamps as floats.
+
+### Verification
+
+`make_run_dir`, `save_run_metadata`, `save_trajectory` and `append_prediction` were checked in a scratch folder:
+
+- Two calls in the same second raise `FileExistsError`, and a second apart they create two folders.
+- `run.json` has all five keys and keeps non-ASCII text as real characters.
+- A trajectory reads back equal to the saved dict, and saving the same instance twice raises.
+- `preds.jsonl` gets one parseable line per call, with `None`, a diff, and `""` kept distinct.
+
+`_harness_git_state` was run in four situations:
+
+- **This repo:** a commit and `dirty: True`.
+- **A clean repo:** `dirty: False`.
+- **Outside a repo:** `None` for both.
+- **Without git on PATH:** `None` for both, with no exception.
+
+The system Python on macOS is 3.9, and the project's `X | None` annotations need 3.10 or newer.
+
+End to end, `main()` ran against Docker with a scripted LM: one edit, then `exit`, and no API calls.
+
+- **A normal run** produced all three files, a trajectory with nine keys and 6 messages, and a summary with `patch_chars = 298`.
+- **With `capture_patch` forced to `None`**, the summary printed `Capture failed` and `preds.jsonl` held `"model_patch": null`.
+- **No container was left behind** in either case.
+
+### Finding from the first real run
+
+Run `2026-10-19T23-11-14` on `sympy__sympy-15599` had `exit_status: Submitted`, `step_count: 1`, `duration_s: 11.99` and `model_patch: ''`. No command ever reached the container.
+
+The single assistant reply narrated a full session (inspecting `Mod.doit`, "the source edit has been applied", "the verification command completed without surfacing any error") and ended with its only bash-action block, `exit`. The system prompt already forbids describing results before seeing them. This is most likely the cause of the earlier real run that also returned `''`.
+
+**Hypothesis, not yet verified.** The reply has exactly one sentence per line. `query_lm` joins the text of every `message` item in `response.output` with `"\n"`. That fits the model emitting several separate short messages in one response, which then read as a whole session. The trajectory cannot confirm it, because the join discards the item boundaries.
+
+**Options, in the recommended order:**
+
+1. Record the response's output item types (and later token usage) in the trajectory, so the hypothesis can be checked.
+2. Reject an `exit` when no command has run yet.
+3. Name the failure in the system prompt.
+
+`harness.dirty` was `True` for this run because Stage 6 was not committed yet, so the commit alone cannot reproduce it.
