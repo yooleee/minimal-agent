@@ -1,3 +1,22 @@
+# =============================================================================
+# default.yaml
+# -----------------------------------------------------------------------------
+# Responsible for: Every setting for a run: dataset, model, agent limits, the
+#                  system and task prompt templates, and the container setup.
+# Role in project: Loaded once by run_single.load_config() (override with
+#                  --config). The values are passed down as plain arguments, so
+#                  Agent and DockerEnvironment never read this file themselves.
+# Assumptions:     Keys under `agent` and `environment` match the parameter names
+#                  of Agent and DockerEnvironment exactly, because they are
+#                  unpacked with **. An unknown key fails with "unexpected
+#                  keyword argument" before any LM call.
+#                  Templates are filled with str.format: {timeout} comes from
+#                  environment.timeout, {output_limit:,}, {head_chars:,} and
+#                  {tail_chars:,} from agent, {repo} and {problem_statement}
+#                  from the dataset row. A literal brace must be doubled ({{ }}).
+#                  Never put # comments inside a | block: they become prompt text.
+# =============================================================================
+
 dataset:
   name: princeton-nlp/SWE-bench_Verified
   split: test

@@ -116,6 +116,58 @@ def build_messages(instance: dict, config: dict) -> list[dict]:
     return [{"role": "system", "content": system}, {"role": "user", "content": task}]
 
 
+# TODO (Step 5): imports for capture_patch:
+#   - Environment from config.environments (the Protocol, for the type hint), so this
+#     function also works with LocalEnvironment in the check below
+#   - subprocess, for subprocess.TimeoutExpired
+#   Then remove the quotes around "Environment" below (quoted only so the file
+#   still imports before the import exists).
+def capture_patch(env: "Environment", base_commit: str) -> str | None:
+    """
+    Collect every change the agent made in the repo as one unified diff.
+
+    Args:
+        env: A started environment whose working directory is the repo (/testbed).
+        base_commit: The instance's "base_commit" from the dataset row.
+
+    Returns:
+        The diff text, exactly as git printed it ("" if the agent changed nothing),
+        or None if capture failed (nonzero exit or timeout).
+
+    Why:
+        The harness takes the patch itself instead of trusting the model to print
+        one, so a submission can't be lost to a formatting mistake. Diffing against
+        base_commit (not HEAD) still catches changes if the agent ran `git commit`.
+        Verified: the image's HEAD is an extra empty "SWE-bench" commit on top of
+        base_commit, so the two give the same diff until the agent commits.
+    """
+    # TODO 1: stage everything, then write the diff to a file OUTSIDE the repo:
+    #           git add -A && git diff --cached <base_commit> > /tmp/model.patch
+    #         - `git add -A` stages new (untracked) files too. Plain `git diff` would
+    #           skip a file the agent created.
+    #         - Why a file: execute() merges stderr into the output, so a git warning
+    #           (seen in the image: "warning: LF will be replaced by CRLF ...") would
+    #           end up inside the patch text and break `git apply` at scoring time.
+    #           Redirecting only stdout keeps the patch clean, and any warnings stay
+    #           in this call's output, where you can print them.
+    #         - Why outside /testbed: a file inside the repo would be staged by the
+    #           next `git add -A` and show up in its own diff.
+    # TODO 2: if that call's returncode != 0, print a warning with the returncode and
+    #         output, and return None (capture failed, which is different from "no changes")
+    # TODO 3: second call: cat /tmp/model.patch. Check its returncode the same way.
+    # TODO 4: return its output as is. Do NOT .strip() it: a patch must end with a
+    #         newline, or `git apply` reports a corrupt patch.
+    # TODO 5: wrap both calls so subprocess.TimeoutExpired also prints a warning and
+    #         returns None, instead of escaping and taking exit_status with it.
+    # DECIDE: `git add -A` also picks up the agent's scratch files (reproduce.py,
+    #   out.txt). Recommended: keep them for now (mini-swe-agent does the same, and the
+    #   harness only runs the tests, so extra files are usually harmless). Revisit if
+    #   Stage 7 shows a failure caused by them.
+    # Known limitations: no --binary flag, so a changed binary file can't be applied.
+    #   execute() decodes with errors="replace", so non-UTF-8 file content gets mangled.
+    raise NotImplementedError
+
+
 def run_instance(instance_id: str, config: dict) -> dict:
     """
     Run the agent on one instance in a fresh container and return a result record.
@@ -140,6 +192,12 @@ def run_instance(instance_id: str, config: dict) -> dict:
 
     agent = Agent(messages, env, model = config["model"]["name"], **config["agent"])
 
+    # TODO (Step 5): right after agent.run(), inside the try (the container is gone
+    #   once the finally runs):
+    #     model_patch = capture_patch(env, instance["base_commit"])
+    #   Then update the docstring's Returns line: model_patch is None only if capture
+    #   failed. If run() raises, capture is skipped and the exception propagates as
+    #   before. Stage 8 can decide whether a crashed run should still keep its patch.
     try:
         env.start()
         exit_status = agent.run()

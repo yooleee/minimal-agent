@@ -1,3 +1,22 @@
+# =============================================================================
+# class_agent.py
+# -----------------------------------------------------------------------------
+# Responsible for: The agent loop. Each step queries the LM, parses exactly one
+#                  bash-action block from the reply, runs it through the
+#                  injected environment, and appends the (truncated) output to
+#                  the chat history. run() repeats steps until a terminating
+#                  exception (Submitted, StepLimit) or too many format errors.
+# Role in project: Built and run by run_single.py, which owns the environment's
+#                  start()/cleanup(). The Agent only calls env.execute().
+# Contract:        run() returns the exit status as a string (the exception
+#                  class name, e.g. "Submitted"). Timeouts from the environment
+#                  arrive as subprocess.TimeoutExpired and are turned into an
+#                  ExecutionTimeout message for the model here.
+# Assumptions:     OPENAI_API_KEY in .env (loaded via python-dotenv). Run from
+#                  the project root so `config.` and `handling.` imports resolve.
+#                  messages[0] is the system prompt (checked in __init__).
+# =============================================================================
+
 import os
 import re
 import subprocess
