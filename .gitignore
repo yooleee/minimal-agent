@@ -11,3 +11,6 @@ __pycache__/
 
 # Personal scratch notes (verification commands live in docs/progression.md)
 temp.txt
+
+# Run outputs (trajectories contain repo code and model output)
+runs/
