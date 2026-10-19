@@ -14,6 +14,8 @@
 
 import argparse
 import subprocess
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -21,9 +23,16 @@ from datasets import load_dataset
 
 from class_agent import Agent
 from config.environments import DockerEnvironment, Environment, swebench_image_name
+from handling.records import (
+    append_prediction,
+    make_run_dir,
+    save_run_metadata,
+    save_trajectory,
+)
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "config" / "default.yaml"
 PATCH_PATH = "/tmp/model.patch"
+DEFAULT_OUTPUT_DIR = Path(__file__).parent / "runs"
 
 
 def load_config(path: Path) -> dict:
@@ -172,7 +181,13 @@ def run_instance(instance_id: str, config: dict) -> dict:
         config: config providing the dataset information, model name and environment variables.
 
     Returns:
-        {"instance_id": str, "exit_status": str, "model_patch": str | None}.
+        {"instance_id": str, "exit_status": str,
+        "model_patch": str | None, "model": model_name from config,
+        "step_count": int (from Agent), "started_at": str (ISO 8601 UTC timestamp),
+        "finished_at": str (ISO 8601 UTC timestamp), "duration_s": float (seconds)
+        "messages": list[dict]
+        }.
+
 
     Why:
         One function = one evaluation unit. Batch runs (Stage 8) will call this
@@ -201,6 +216,9 @@ def run_instance(instance_id: str, config: dict) -> dict:
     agent = Agent(messages, env, model = config["model"]["name"], **config["agent"])
 
     try:
+        started_at = datetime.now(timezone.utc).isoformat()
+        start_clock = time.monotonic()
+
         env.start()
         exit_status = agent.run()
         model_patch = capture_patch(env, instance["base_commit"])
@@ -208,7 +226,16 @@ def run_instance(instance_id: str, config: dict) -> dict:
     finally:
         env.cleanup()
 
-    return {"instance_id": instance_id, "exit_status": exit_status, "model_patch": model_patch}
+    finished_at = datetime.now(timezone.utc).isoformat()
+    duration_s = time.monotonic() - start_clock
+
+    return {
+        "instance_id": instance_id, "exit_status": exit_status,
+        "model_patch": model_patch, "model": config["model"]["name"],
+        "step_count": agent.step_count, "started_at": started_at,
+        "finished_at": finished_at, "duration_s": round(duration_s, 4),
+        "messages": agent.messages
+    }
 
 
 def main() -> None:
@@ -216,7 +243,7 @@ def main() -> None:
     Parse the command line and run one instance.
 
     Returns:
-        None. Prints the result record.
+        None. Saves the run and prints a summary of the outcome.
 
     Why:
         Keeps the __main__ guard to one line and makes run_instance() importable
@@ -241,14 +268,28 @@ def main() -> None:
     #   - import the four functions from handling.records
     #   Update this docstring's Returns line (it no longer prints the record).
     parser = argparse.ArgumentParser(description = "Run one instance")
+
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="Pass the yaml config path for the agent such as: default.yaml")
     parser.add_argument("instance_id", help = "Pass an SWE-bench instance id such as: sympy__sympy-15599")
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Provide the directory path where run outputs will be placed")
 
     args = parser.parse_args()
     config = load_config(args.config)
+
+    run_dir = make_run_dir(args.output_dir)
+    save_run_metadata(run_dir, config)
+
     result = run_instance(args.instance_id, config)
 
-    print(result)
+    trajectory_path = save_trajectory(run_dir, result)
+    append_prediction(run_dir, result)
+
+    patch_chars = "Capture failed" if result['model_patch'] is None else len(result['model_patch'])
+
+    print(
+        f"instance_id = {result['instance_id']}", f"exit status = {result['exit_status']}",
+        f"patch_chars = {patch_chars}", f"Trajectory path = {trajectory_path}"
+    )
 
 
 if __name__ == "__main__":

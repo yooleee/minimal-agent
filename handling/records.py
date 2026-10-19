@@ -51,8 +51,50 @@ def make_run_dir(base: Path) -> Path:
     # TODO 3: run_dir = base / run_id, then run_dir.mkdir(exist_ok=False)
     #         (exist_ok=False here: this folder must be new)
     # TODO 4: return run_dir
-    raise NotImplementedError
+    #
 
+    run_id = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+    base.mkdir(parents=True, exist_ok=True)
+
+    run_dir = base / run_id
+    run_dir.mkdir(exist_ok=False)
+
+    return run_dir
+
+def _run_git(args: list[str], repo: Path) -> str | None:
+
+    """
+    Run the git command and checks for git failures (OSError, Timeout, Nonzero Returncode).
+
+    Args:
+        args: The git command arguments / flags
+        repo: The repo the command is being initiated at.
+
+    Returns:
+        Git command output returned as a string or None if git failed or could not run.
+
+    Why:
+        The helper deals with how git can fail when recording a run. Placing this process
+        into a function removes needing to hard code the same try / except block across multiple
+        calls. Instead the function is called when a git command is run and the output is returned
+        if no failures occur.
+    """
+
+    try:
+
+        git_run = subprocess.run(
+            ["git", *args],
+            cwd=repo, capture_output=True,
+            text=True, timeout=10, check=False
+        )
+
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+    if git_run.returncode != 0:
+        return None
+
+    return git_run.stdout
 
 def _harness_git_state() -> dict:
     """
@@ -77,7 +119,17 @@ def _harness_git_state() -> dict:
     #         installed) or TimeoutExpired, use None for that value. Don't raise:
     #         a missing version stamp shouldn't stop a run.
     # TODO 5: return {"commit": ..., "dirty": ...}
-    raise NotImplementedError
+    #
+
+    git_repo = Path(__file__).resolve().parent.parent
+
+    outbound_commit = _run_git(["rev-parse", "HEAD"], git_repo)
+    outbound_status = _run_git(["status", "--porcelain"], git_repo)
+
+    commit = None if outbound_commit is None else outbound_commit.strip()
+    dirty = None if outbound_status is None else (outbound_status.strip() != "")
+
+    return {"commit": commit, "dirty": dirty}
 
 
 def save_run_metadata(run_dir: Path, config: dict) -> None:
@@ -107,7 +159,18 @@ def save_run_metadata(run_dir: Path, config: dict) -> None:
     #         run_dir / "run.json", opened with encoding="utf-8"
     #         (ensure_ascii=False keeps non-ASCII text readable instead of \u escapes,
     #         and the explicit encoding makes that safe on Windows too)
-    raise NotImplementedError
+
+    metadata = {
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "harness": _harness_git_state(),
+        "python": sys.version,
+        "argv": sys.argv,
+        "config": config
+    }
+
+    path = run_dir / "run.json"
+    with path.open("x", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2, ensure_ascii=False)
 
 
 def save_trajectory(run_dir: Path, record: dict) -> Path:
@@ -135,7 +198,14 @@ def save_trajectory(run_dir: Path, record: dict) -> Path:
     #         Why "x" and not "w": "w" would silently overwrite an earlier result for
     #         the same instance. Same reasoning as exist_ok=False in make_run_dir.
     # TODO 3: return path
-    raise NotImplementedError
+
+    path = run_dir / f"{record['instance_id']}.traj.json"
+
+    with path.open("x", encoding="utf-8") as f:
+        json.dump(record, f, indent=2, ensure_ascii=False)
+
+    return path
+
 
 
 def append_prediction(run_dir: Path, record: dict) -> None:
@@ -167,4 +237,15 @@ def append_prediction(run_dir: Path, record: dict) -> None:
     #         NO indent: JSONL needs each record on exactly one line.
     # TODO 3: open run_dir / "preds.jsonl" with mode "a" (append, create if missing)
     #         and encoding="utf-8", and write line + "\n"
-    raise NotImplementedError
+
+    prediction = {
+        "instance_id": record["instance_id"],
+        "model_name_or_path": record["model"],
+        "model_patch": record["model_patch"]
+    }
+
+    line = json.dumps(prediction, ensure_ascii=False)
+    path = run_dir / "preds.jsonl"
+
+    with path.open("a", encoding="utf-8") as f:
+        f.write(line + "\n")
