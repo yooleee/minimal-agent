@@ -10,8 +10,8 @@ Goal of the project: one SWE-bench (bash-only) instance per evaluation, run unat
 | 2 | Inject the environment into `Agent` | Done |
 | 3 | `run_single.py`: one instance end to end, with guaranteed cleanup | Done |
 | 4 | `config/default.yaml` as the single source of run settings | Done |
-| 5 | Patch capture (`model_patch`) | Next |
-| 6 | Run record (config, messages, result) saved to disk | Planned |
+| 5 | Patch capture (`model_patch`) | Done |
+| 6 | Run record (config, messages, result) saved to disk | Next |
 | 7 | Scoring with the SWE-bench harness | Planned |
 | 8 | Robustness and batch runs | Planned |
 
@@ -211,3 +211,49 @@ docker ps -a --filter name=minimal-agent
 ```
 
 An empty config file raises `TypeError` naming the path.
+
+---
+
+## Step 5: Patch capture
+
+**Goal.** After the agent finishes, the harness collects everything it changed in `/testbed` as one unified diff and stores it in the record's `model_patch`. This is the text Stage 7 will hand to the SWE-bench harness for scoring.
+
+### Design decisions
+
+- **The harness captures the patch itself.** It does not rely on the model printing a diff, so a formatting slip cannot lose a submission.
+- **`capture_patch` builds a command string, not an argv list.** It is a caller of `env.execute()`, like the Agent. The argv list is built one layer down in `_docker_exec_argv`, where the string becomes the single argument after `bash -c`. The command also needs shell syntax (`&&`, `>`), which only works through bash.
+- **`git add -A`, then `git diff --cached <base_commit>`.** Plain `git diff` skips files the agent created. Diffing against `base_commit` instead of HEAD still catches changes if the agent runs `git commit`. Checked in the image: HEAD is an extra empty "SWE-bench" commit on top of `base_commit`, and the tree starts clean.
+- **Two calls: write the diff to `/tmp/model.patch`, then `cat` it.** `execute()` merges stderr into the output, and git writes warnings to stderr (seen in the image: `warning: LF will be replaced by CRLF ...`). Redirecting only stdout to a file keeps those warnings out of the patch. The file sits outside `/testbed` so it never appears in its own diff.
+- **The output is returned without `.strip()`.** A patch must end with a newline, or `git apply` reports it as corrupt.
+- **Three distinct outcomes.** A diff string, `""` (captured, no changes), and `None` (capture failed). A nonzero exit or a timeout prints a warning starting with "Patch capture failed" that includes git's own message, and returns `None`. The run's `exit_status` is kept either way.
+- **It lives in `run_single.py`, typed against the `Environment` Protocol.** It is specific to SWE-bench and git, so it stays out of the generic environments. The Protocol type means it can be tested with `LocalEnvironment`.
+- **The call goes inside the `try`, right after `agent.run()`.** After the `finally` the container is gone. If `run()` raises, capture is skipped. Stage 8 can decide whether a crashed run should keep its patch.
+- **`base_commit` goes into the shell string unquoted.** That is safe because it is always a 40-character hex hash from the dataset. A value that could come from a user or the model would need `shlex.quote`.
+- **Scratch files are kept.** `git add -A` also picks up files like `reproduce.py`. mini-swe-agent does the same, and extra files rarely affect the test run. Revisit if Stage 7 shows a failure caused by them.
+- **Known limitations.** There is no `--binary` flag, so a changed binary file cannot be applied. `execute()` decodes with `errors="replace"`, so non-UTF-8 content is mangled.
+
+### Bugs found in review
+
+- **The failure warnings left out git's message**, which is the only explanation of why capture failed in an unattended run.
+- **The second warning printed the first call's output** (copy-paste), so a failed `cat` would have shown an empty reason.
+- **Nested same-type quotes in f-strings** (`f"{x["key"]}"`) only parse on Python 3.12+ (PEP 701). On older Pythons the whole file fails to import. Single quotes inside the braces work everywhere.
+
+### Verification
+
+Run by hand first, in a manually started container:
+
+```bash
+docker run -d --platform linux/amd64 --name swe-test docker.io/swebench/sweb.eval.x86_64.sympy_1776_sympy-15599:latest sleep infinity
+docker exec -w /testbed swe-test bash -c "echo x >> README.rst && echo new > zz_new.py"
+docker exec -w /testbed swe-test bash -c "git add -A && git diff --cached 5e17a90c19f7eecfa10c1ab872648ae7e2131323 > /tmp/model.patch"; echo "exit: $?"
+docker exec -w /testbed swe-test bash -c "cat /tmp/model.patch"
+docker rm -f swe-test
+```
+
+Checks 1 to 3 used `LocalEnvironment` on a temporary git repo:
+
+- An edit, a new file and a committed change all appear in the patch. The patch ends with `"\n"` and passes `git apply --check` on a fresh clone at the base commit.
+- A clean repo returns `""`, not `None`.
+- A bogus `base_commit` returns `None` with the warning `128 Patch capture failed due to fatal: bad object ...`. A timeout also returns `None`.
+
+Check 4, end to end. `run_instance` was run against Docker with a scripted LM (`Agent.query_lm` replaced, so there were no API calls) that appended one line to `sympy/core/mod.py` and then exited. The record had `exit_status: Submitted` and a `model_patch` starting with `diff --git a/sympy/core/mod.py`, and no container was left behind. A real run returned `model_patch: ''`. Capture worked, but the agent left no changes, so that run would score as unresolved.
