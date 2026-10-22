@@ -12,6 +12,7 @@ Goal of the project: one SWE-bench (bash-only) instance per evaluation, run unat
 | 4 | `config/default.yaml` as the single source of run settings | Done |
 | 5 | Patch capture (`model_patch`) | Done |
 | 6 | Run record (config, messages, result) saved to disk | Done |
+| 6b | Per-call LM record, early-exit guard, prompt fixes | Done |
 | 7 | Scoring with the SWE-bench harness | Next |
 | 8 | Robustness and batch runs | Planned |
 
@@ -345,3 +346,50 @@ The single assistant reply narrated a full session (inspecting `Mod.doit`, "the 
 3. Name the failure in the system prompt.
 
 `harness.dirty` was `True` for this run because Stage 6 was not committed yet, so the commit alone cannot reproduce it.
+
+## Step 6b: What the API returned, and the early exits
+
+**Goal.** Test the Step 6 hypothesis, then stop runs from ending before any command has run.
+
+### Design decisions
+
+- **`Agent.lm_calls` holds one entry per API call**, saved in the trajectory next to `messages`. Each entry has `step`, `output_types`, `message_items` and four token counts. It is appended before `parse_action`, so a rejected reply is still recorded. That call happened and was billed.
+- **`message_items` keeps each message's `phase` and text together** (`{"phase", "text"}`). The OpenAI SDK marks each message item as `"commentary"` or `"final_answer"`. An earlier version stored phases in their own list, next to `output_types`. Two parallel lists only stay correct while their order matches, so the phases moved into the items.
+- **One loop builds both the record and the returned text.** Each message's parts are joined first, then the messages are joined with `"\n"`. The model receives the same string as before.
+- **No separate message count.** It equals `output_types.count("message")`.
+- **Token counts are `None` when `response.usage` is `None`.** "Not reported" stays different from 0. `reasoning_tokens` (hidden reasoning, billed as output) and `cached_tokens` (prompt-cache hits, billed cheaper) are included for later cost work.
+- **`PrematureExit` rejects `exit` while `commands_run == 0`.** It is a new `NonTerminatingException`, not a `FormatError`, because the reply was well formed and should not use up the format-error budget. `commands_run` is incremented before `execute_action`, so a command that times out still counts. Each rejection costs a step, so `StepLimit` bounds a model that keeps trying to exit.
+- **Prompt changes.** The model is told that it cannot run commands itself, that only the one block in its reply runs, and that `exit` must follow command output that verifies the fix. The line asking it to describe "what you will do next" was removed, because it invited narration.
+- **The format-error message** now separates its sentences with newlines. Implicit string concatenation had joined them with no space.
+
+### Bugs found in review
+
+- `"\n".join(message_items)` joined dicts, which raises `TypeError` on the first API call. The next version, `("\n".join(items) for items in message_items["text"])`, indexed a list with a string and returned a generator instead of a string. The fix joins `item["text"]` for each item.
+- The new prompt line was added next to the old narration line instead of replacing it, so the prompt asked for both.
+- The unused `from asyncio.subprocess import STDOUT` import was first only moved by an import sorter, and the edit that removed it was not saved.
+
+### Verification
+
+A fake API client, running real `run()` calls with no API spend, confirmed:
+
+- A reply with a block in both a commentary and a final-answer message is recorded with each block under its own phase, and is rejected as a format error.
+- `usage=None` records `None` for all four token counts.
+- A first reply of `exit` is rejected with `PrematureExit`, and the run continues.
+
+### Findings from real runs
+
+All runs are on `sympy__sympy-15599`.
+
+- **The hypothesis is confirmed.** Before the fix, four runs (`2026-10-20T00-44-28` to `00-48-35`) each ended after one API call, with an empty patch. Each call returned 6 to 8 messages, interleaved with reasoning items. Read together, they narrated a whole session that never ran, then ended with `exit`. A later run with `message_items` showed the phases: many `commentary` messages, then one `final_answer`.
+- **The prompt change did not stop the first-call narration.** It still happened in every run afterwards. What recovered those runs was the guard and the format check:
+  - In five runs (`2026-10-20T03-30-07` to `03-44-27`), the first reply ended in `exit` three times, which the guard caught. The other two times it held several blocks, which the format check caught.
+  - After that one correction, most calls held a single message.
+  - All five ended `Submitted` with a non-empty patch. So did `2026-10-21T00-57-20`.
+- **Format errors.**
+  - In `00-57-20`, one step put its only block in a commentary message and left the final answer empty. Parsing only `final_answer` would have rejected a valid reply, so that option is ruled out.
+  - The one format error in that run was the same 785-character block repeated in both phases.
+  - Accepting a reply whose blocks are all identical is a possible fix. It is not made yet, because it rests on one example.
+- **The existing tests matter.**
+  - `pytest` is not installed in the image. In two runs the model ran the existing tests anyway: it imported `test_arit.py` directly, or used `bin/test`.
+  - Both runs found that a fix like the issue's suggestion broke `test_Mod` on a float case, then iterated: 29 steps and 242 s, and 15 steps and 100 s.
+  - Three of the earlier runs submitted after 5 to 11 steps without running `test_Mod`. Their patches may contain that regression. Stage 7 scoring will show it.

@@ -193,10 +193,6 @@ def run_instance(instance_id: str, config: dict) -> dict:
         One function = one evaluation unit. Batch runs (Stage 8) will call this
         in a loop; scoring (Stage 7) will consume the records it returns.
     """
-    # TODO (Step 6b): add "lm_calls": agent.lm_calls to the returned record, just before
-    #   "messages" (messages stays last so the short fields are at the top of the file).
-    #   Add it to the docstring's Returns as "lm_calls": list[dict].
-
     instance = load_instance(instance_id, config["dataset"]["name"], config["dataset"]["split"])
     messages = build_messages(instance, config)
 

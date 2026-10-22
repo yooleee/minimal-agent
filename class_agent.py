@@ -56,9 +56,6 @@ class Agent:
         self.tail_chars = tail_chars
         self.messages = list(messages)
         self.lm_calls: list[dict] = []
-        # TODO (Step 6b): add self.lm_calls: list[dict] = [] here.
-        #   One entry per API call, filled in query_lm. It records what the API returned
-        #   BEFORE the output is flattened into one string, which self.messages can't show.
 
         if not self.messages or self.messages[0]["role"] != "system":
             raise ValueError("Messages must start with a system prompt")
@@ -85,33 +82,6 @@ class Agent:
         response = self.client.responses.create(model=self.model, input=self.messages) # pyright: ignore[reportArgumentType]
         usage = response.usage
 
-        # TODO (Step 6b): right here, before the loop below joins the text, append one
-        #   entry to self.lm_calls:
-        #     {
-        #         "step": self.step_count,
-        #         "output_types": [item.type for item in response.output],
-        #         "input_tokens": ...,
-        #         "output_tokens": ...,
-        #         "reasoning_tokens": ...,
-        #         "cached_tokens": ...,
-        #     }
-        #   - output_types is the evidence for the Step 6 finding: a reply like the
-        #     rejected one in run 2026-10-19T23-14-19 should show several "message"
-        #     items. No separate message_count: it's output_types.count("message"),
-        #     and storing both would be two copies of one fact (DRY).
-        #   - Token fields come from response.usage (checked against openai 3.19.2):
-        #       usage.input_tokens, usage.output_tokens,
-        #       usage.output_tokens_details.reasoning_tokens  (hidden reasoning, billed
-        #           as output; explains a slow call with a short reply)
-        #       usage.input_tokens_details.cached_tokens      (prompt-cache hits, billed
-        #           cheaper; matters for cost once batches run)
-        #   - response.usage is typed Optional (it can be None). Guard with
-        #     `if usage is None` and record None for all four token fields in that case:
-        #     None = "not reported", which is different from 0 tokens. The `is None` guard
-        #     also narrows the type for pyright, same as the container_id guard in
-        #     environments.py.
-        #   - Append even when the reply later fails parse_action: the call happened and
-        #     was billed, so it belongs in the record.
         message_items = []
 
         for item in response.output:
