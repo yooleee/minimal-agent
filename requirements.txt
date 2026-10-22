@@ -1,0 +1,19 @@
+# =============================================================================
+# requirements.txt
+# -----------------------------------------------------------------------------
+# Responsible for: Pinning the packages this project imports directly.
+# Role in project: Install with `python -m pip install -r requirements.txt`
+#                  into the project venv. swebench is pinned because its
+#                  version decides how a patch is scored, so results are only
+#                  comparable across runs scored with the same version.
+# Assumptions:     Python 3.12 (3.10+ needed for `X | None` annotations).
+#                  Docker is installed separately (not a pip package).
+#                  Only direct dependencies are listed. Their own dependencies
+#                  resolve freely, so this is not a full lock file.
+# =============================================================================
+
+datasets==5.1.0
+openai==3.19.2
+python-dotenv==1.2.3
+PyYAML==6.0.3
+swebench==5.0.2

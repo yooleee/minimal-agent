@@ -18,7 +18,7 @@
 # =============================================================================
 
 dataset:
-  name: princeton-nlp/SWE-bench_Verified
+  name: SWE-bench/SWE-bench_Verified
   split: test
 
 model:

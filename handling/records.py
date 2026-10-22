@@ -193,3 +193,33 @@ def append_prediction(run_dir: Path, record: dict) -> None:
 
     with path.open("a", encoding="utf-8") as f:
         f.write(line + "\n")
+
+
+# TODO (Stage 7): add "scores.json  written by score_run.py (Stage 7)" to the
+#   Layout block in this file's header, and note that the harness's own
+#   <model>.<run_id>.json and logs/ also land in the run folder (see scoring.py).
+def save_scores(run_dir: Path, scores: dict) -> Path:
+    """
+    Write scores.json: one status and the test results per scored instance.
+
+    Args:
+        run_dir: The scored run folder.
+        scores: The dict returned by scoring.collect_scores().
+
+    Returns:
+        Path of the written file, run_dir / "scores.json".
+
+    Raises:
+        FileExistsError: if the run was already scored.
+
+    Why:
+        Lives here because this module owns everything a run leaves on disk.
+        Mode "x" follows the Step 6 rule that nothing is silently overwritten.
+        To rescore, delete scores.json first (the harness itself skips
+        instances that already have a report.json for this run id, so the
+        old logs/ folder must go too for a true rerun).
+    """
+    # TODO: same pattern as save_trajectory: open with mode "x" and
+    #       encoding="utf-8", json.dump(scores, f, indent=2, ensure_ascii=False),
+    #       return the path.
+    raise NotImplementedError
