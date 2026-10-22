@@ -26,8 +26,10 @@ class ExecutionTimeout(NonTerminatingException):
 
     """ Raised when a command timeouts, the model should attempt a different direction."""
 
+class PrematureExit(NonTerminatingException):
+
+    """ Raised when the agent prematurely exits without running any commands """
+
 class StepLimit(TerminatingException):
 
     """ Raised when the # of steps is over the limit terminating the session. """
-
-# List the files in the current directory. Run the exit command once complete.

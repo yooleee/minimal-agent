@@ -29,6 +29,7 @@ from handling.exceptions import (
     ExecutionTimeout,
     FormatError,
     NonTerminatingException,
+    PrematureExit,
     StepLimit,
     Submitted,
     TerminatingException,
@@ -48,11 +49,16 @@ class Agent:
         self.env = env
         self.max_steps = max_steps
         self.step_count = 0
+        self.commands_run = 0
         self.max_format_errors = max_format_errors
         self.output_limit = output_limit
         self.head_chars = head_chars
         self.tail_chars = tail_chars
         self.messages = list(messages)
+        self.lm_calls: list[dict] = []
+        # TODO (Step 6b): add self.lm_calls: list[dict] = [] here.
+        #   One entry per API call, filled in query_lm. It records what the API returned
+        #   BEFORE the output is flattened into one string, which self.messages can't show.
 
         if not self.messages or self.messages[0]["role"] != "system":
             raise ValueError("Messages must start with a system prompt")
@@ -77,18 +83,58 @@ class Agent:
         # message dictionary is unverified but not incorrect {system: prompt, "user": prompt}.
 
         response = self.client.responses.create(model=self.model, input=self.messages) # pyright: ignore[reportArgumentType]
+        usage = response.usage
 
-        output_parts = []
+        # TODO (Step 6b): right here, before the loop below joins the text, append one
+        #   entry to self.lm_calls:
+        #     {
+        #         "step": self.step_count,
+        #         "output_types": [item.type for item in response.output],
+        #         "input_tokens": ...,
+        #         "output_tokens": ...,
+        #         "reasoning_tokens": ...,
+        #         "cached_tokens": ...,
+        #     }
+        #   - output_types is the evidence for the Step 6 finding: a reply like the
+        #     rejected one in run 2026-10-19T23-14-19 should show several "message"
+        #     items. No separate message_count: it's output_types.count("message"),
+        #     and storing both would be two copies of one fact (DRY).
+        #   - Token fields come from response.usage (checked against openai 3.19.2):
+        #       usage.input_tokens, usage.output_tokens,
+        #       usage.output_tokens_details.reasoning_tokens  (hidden reasoning, billed
+        #           as output; explains a slow call with a short reply)
+        #       usage.input_tokens_details.cached_tokens      (prompt-cache hits, billed
+        #           cheaper; matters for cost once batches run)
+        #   - response.usage is typed Optional (it can be None). Guard with
+        #     `if usage is None` and record None for all four token fields in that case:
+        #     None = "not reported", which is different from 0 tokens. The `is None` guard
+        #     also narrows the type for pyright, same as the container_id guard in
+        #     environments.py.
+        #   - Append even when the reply later fails parse_action: the call happened and
+        #     was billed, so it belongs in the record.
+        message_items = []
 
         for item in response.output:
 
             if item.type == "message":
+                message_parts = []
                 for parts in item.content:
                     if parts.type == "output_text":
-                        output_parts.append(parts.text)
+                        message_parts.append(parts.text)
 
+                message_items.append({"phase": item.phase, "text": "\n".join(message_parts)})
 
-        return "\n".join(output_parts)
+        self.lm_calls.append({
+            "step": self.step_count,
+            "output_types": [item.type for item in response.output],
+            "message_items": message_items,
+            "input_tokens": None if usage is None else usage.input_tokens,
+            "output_tokens": None if usage is None else usage.output_tokens,
+            "reasoning_tokens": None if usage is None else usage.output_tokens_details.reasoning_tokens,
+            "cached_tokens": None if usage is None else usage.input_tokens_details.cached_tokens,
+        })
+
+        return "\n".join(item["text"] for item in message_items)
 
     def parse_action(self, lm_output: str) -> str:
         """Takes the LM output, returns the action"""
@@ -103,8 +149,8 @@ class Agent:
                     "role": "user",
                     "content": (
                         f"Found {len(matches)} bash-action blocks; expected exactly one."
-                        "Nothing from this reply was executed."
-                        "Reply with exactly one bash-action block, or run exit to finish"
+                        "\nNothing from this reply was executed."
+                        "\nReply with exactly one bash-action block, or run exit to finish"
                     )
             }
         )
@@ -160,10 +206,15 @@ class Agent:
         self.add_message("assistant", lm_output)
 
         action = self.parse_action(lm_output)
+
+        if action == "exit" and self.commands_run == 0:
+            raise PrematureExit({"role": "user", "content": "Nothing has been executed yet, please start with a command"})
+
         print("Action", action)
         if action == "exit":
             raise Submitted({"role": "user", "content": "LM requested to quit"})
 
+        self.commands_run += 1
         action_outcome = self.execute_action(action)
         output = self.format_output(action_outcome)
         print("Output", output)

@@ -35,7 +35,7 @@ system_template: |
     You are a helpful assistant that completes tasks by running bash commands.
 
     In each reply:
-    1. Briefly explain your reasoning: what you know so far and what you will do next.
+    1. In one or two sentences, say what you learned from the last output and what this command is for.
     2. Then include exactly one bash-action block on its own lines with the command(s) to run:
 
     ```bash-action
@@ -47,9 +47,9 @@ system_template: |
     - Put the block on its own lines; end your reply immmediately after the block.
     - Each block runs in a new shell, so directory changes and environment variables do not persist between replies. Chain them where needed, e.g. cd dir && ls.
     - Commands time out after {timeout} seconds. Avoid interactive commands and anything that runs indefinitely.
-    - You will see the output of each command before your next reply; don't describe results until you've seen the output.
+    - You cannot run commands yourself. Only the single block in this reply is executed, and you will see its output in the next message. Never describe results you have not seen.
     - Command output longer than {output_limit:,} characters is truncated: you will see only the first {head_chars:,} and last {tail_chars:,} characters. For large outputs, redirect to a file (e.g. cmd > out.txt 2>&1) and inspect it in pieces with grep -n, head, tail, or sed -n 'START,ENDp' out.txt.
-    - When the task is complete and the output is verified, reply with a block containing only: exit
+    - Reply with a block containing only: exit, and nothing else, only after you have seen command output in this conversation that verifies the fix.
 
 task_template: |
     Here is an issue from the {repo} repository, which is located at /testbed:
@@ -60,7 +60,7 @@ task_template: |
 
     Fix this issue by modifying non-test source files only. Do not modify tests.
     Recommended workflow: find the relevant code, write a small script that reproduces the issue,
-    make the fix, then re-run the script to verify it. When you are done, exit.
+    make the fix, then re-run the script to verify it. When you are done, exit as described in the rules.
 
 
 environment:

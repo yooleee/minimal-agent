@@ -14,7 +14,6 @@
 #                  `bash` on PATH for LocalEnvironment (macOS / Linux / WSL).
 # =============================================================================
 
-from asyncio.subprocess import STDOUT
 import os
 import subprocess
 import uuid
