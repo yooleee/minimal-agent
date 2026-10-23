@@ -56,6 +56,8 @@ def read_predictions(run_dir: Path) -> dict[str, dict]:
     Raises:
         FileNotFoundError: if the run folder has no preds.jsonl (for example a
             run that crashed before append_prediction).
+        ValueError: if preds.jsonl is empty (for example if manually edited or batch runner
+        creates prediction jsonl files before an instance finishes).
 
     Why:
         Both run_harness (needs the model name to find the summary file) and
@@ -68,7 +70,44 @@ def read_predictions(run_dir: Path) -> dict[str, dict]:
     # TODO 2: one json.loads per non-empty line (JSONL: one object per line).
     #         Skip blank lines, e.g. a trailing "\n" read as an empty line.
     # TODO 3: return a dict keyed by each prediction's "instance_id".
-    raise NotImplementedError
+
+    path = run_dir / "preds.jsonl"
+    predictions = {}
+
+    with path.open("r", encoding="utf-8") as f:
+
+        for line in f:
+            if line.strip():
+                prediction = json.loads(line)
+                prediction_id = prediction["instance_id"]
+
+                predictions[prediction_id] = prediction
+
+    if not predictions:
+        raise ValueError(f"preds.jsonl located at {path} is empty.")
+
+    return predictions
+
+def safe_model_name(model_name: str) -> str:
+
+    """
+
+    Return model_name in a path safe format.
+
+    Args:
+        model_name the model_name_or_path from preds.jsonl
+
+    Returns: model_name: str
+
+    Why:
+
+        In its initial form the model_name would cause any path usage to break in the py file.
+        Switching the "/" to "__" fixes this and ensures the path can be appropriately written
+        in the exact harness format and then called.
+
+    """
+
+    return model_name.replace("/","__")
 
 
 def harness_report_path(run_dir: Path, model_name: str) -> Path:
@@ -90,7 +129,8 @@ def harness_report_path(run_dir: Path, model_name: str) -> Path:
     """
     # TODO: build the file name exactly as described in Returns. The "/" -> "__"
     #       replacement matters for model names like "openai/gpt-...".
-    raise NotImplementedError
+
+    return run_dir / f"{safe_model_name(model_name)}.{run_dir.name}.json"
 
 
 def run_harness(
@@ -126,6 +166,7 @@ def run_harness(
         harness runs with cwd=run_dir, so its logs land inside the run folder
         and everything about one run stays in one place.
     """
+
     # TODO 1: predictions = read_predictions(run_dir). Take model_name from any
     #         prediction (all lines share it, see the file header).
     # TODO 2: build the argv as a list (no shell=True):
@@ -150,8 +191,31 @@ def run_harness(
     # TODO 4: nonzero returncode -> raise RuntimeError naming the returncode.
     # TODO 5: report = harness_report_path(run_dir, model_name). If it does not
     #         exist, raise RuntimeError (the naming assumption broke). Else return it.
-    raise NotImplementedError
 
+    predictions = read_predictions(run_dir)
+    model_name = next(iter(predictions.values()))["model_name_or_path"]
+
+    argv = [
+        sys.executable, "-m", HARNESS_MODULE,
+        "--dataset_name", dataset_name, "--split", split,
+        "--predictions_path", "preds.jsonl",
+        "--run_id", run_dir.name,
+        "--instance_ids", *predictions,
+        "--max_workers", str(max_workers), "--timeout", str(timeout),
+        "--report_dir", "."
+    ]
+
+    output = subprocess.run(argv, cwd=run_dir, check=False)
+
+    if output.returncode != 0:
+        raise RuntimeError(f"Harness exited with code {output.returncode}")
+
+    report = harness_report_path(run_dir, model_name)
+
+    if not report.exists():
+        raise RuntimeError("No harness report path exists")
+
+    return report
 
 def collect_scores(
     run_dir: Path, harness_report: Path, dataset_name: str, split: str
@@ -188,6 +252,7 @@ def collect_scores(
         swebench_version is recorded because the scorer's version decides the
         result, the same way run.json records the harness commit.
     """
+
     # TODO 1: summary = json.loads(harness_report.read_text(encoding="utf-8")).
     #         The id lists used below: "resolved_ids", "unresolved_ids",
     #         "error_ids", "empty_patch_ids". In 5.0.2 a predicted instance is
@@ -196,10 +261,10 @@ def collect_scores(
     #         does not change the result.
     # TODO 2: predictions = read_predictions(run_dir).
     # TODO 3: for each instance_id in predictions, pick its status:
-    #           - in empty_patch_ids: "capture_failed" if its model_patch is None,
-    #             else "empty_patch"
-    #           - in resolved_ids / unresolved_ids / error_ids: that status
-    #           - in none of them: raise ValueError (see Raises)
+    #          - in empty_patch_ids: "capture_failed" if its model_patch is None,
+    #            else "empty_patch"
+    #          - in resolved_ids / unresolved_ids / error_ids: that status
+    #          - in none of them: raise ValueError (see Raises)
     # TODO 4: tests: the per-instance report is at
     #           run_dir / HARNESS_LOG_DIR / run_dir.name /
     #           <model_name with "/" -> "__"> / instance_id / "report.json"
@@ -211,5 +276,66 @@ def collect_scores(
     # TODO 5: summary counts: one entry per status in STATUSES, including zeros,
     #         so every scores.json has the same keys.
     # TODO 6: swebench_version = version("swebench") (importlib.metadata).
-    # TODO 7: return the dict described in Returns.
-    raise NotImplementedError
+    #  TODO 7: return the dict described in Returns.
+
+    summary = json.loads(harness_report.read_text(encoding="utf-8"))
+    predictions = read_predictions(run_dir)
+    model_name = next(iter(predictions.values()))["model_name_or_path"]
+
+    instances = {}
+    counts = {status: 0 for status in STATUSES}
+
+    for instance_id, prediction in predictions.items():
+        if instance_id in summary["empty_patch_ids"]:
+
+            if prediction["model_patch"] is None:
+                status = "capture_failed"
+
+            else:
+                status = "empty_patch"
+
+        elif instance_id in summary["resolved_ids"]:
+            status = "resolved"
+
+        elif instance_id in summary["unresolved_ids"]:
+            status = "unresolved"
+
+        elif instance_id in summary["error_ids"]:
+            status = "error"
+
+        else:
+            raise ValueError(f"No instance id for {instance_id} is included in the harness id list")
+
+        report_path = run_dir / HARNESS_LOG_DIR / run_dir.name / safe_model_name(model_name) / instance_id / "report.json"
+        counts[status] += 1
+
+        fail_to_pass = None
+        pass_to_pass = None
+
+        if report_path.exists():
+
+            try:
+
+                instance_report = json.loads(report_path.read_text(encoding="utf-8"))
+
+                fail_to_pass = instance_report[instance_id]["tests_status"]["FAIL_TO_PASS"]
+                pass_to_pass = instance_report[instance_id]["tests_status"]["PASS_TO_PASS"]
+
+
+            except(json.JSONDecodeError, KeyError):
+                pass
+
+        instances[instance_id] = {
+            "status": status,
+            "fail_to_pass": fail_to_pass,
+            "pass_to_pass": pass_to_pass,
+
+        }
+
+    swebench_version = version("swebench")
+
+    return {
+        "run_id": run_dir.name, "dataset": dataset_name, "split": split,
+        "swebench_version": swebench_version,
+        "summary": counts, "instances": instances
+    }

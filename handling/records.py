@@ -11,6 +11,10 @@
 #                      run.json                    written once, before any instance
 #                      <instance_id>.traj.json     one per instance
 #                      preds.jsonl                 one line appended per instance
+#                      scores.json                 written by score_run.py
+#                      <model>.<run_id>.json       harness summary, written by the
+#                                                  SWE-bench harness (see scoring.py)
+#                      logs/                       harness per-instance logs (see scoring.py)
 # Assumptions:     Records are plain dicts from run_instance() holding only JSON-
 #                  serializable values (str, int, float, None, list, dict).
 #                  `git` on PATH for the harness version (recorded as None if not).
@@ -195,9 +199,6 @@ def append_prediction(run_dir: Path, record: dict) -> None:
         f.write(line + "\n")
 
 
-# TODO (Stage 7): add "scores.json  written by score_run.py (Stage 7)" to the
-#   Layout block in this file's header, and note that the harness's own
-#   <model>.<run_id>.json and logs/ also land in the run folder (see scoring.py).
 def save_scores(run_dir: Path, scores: dict) -> Path:
     """
     Write scores.json: one status and the test results per scored instance.
@@ -219,7 +220,10 @@ def save_scores(run_dir: Path, scores: dict) -> Path:
         instances that already have a report.json for this run id, so the
         old logs/ folder must go too for a true rerun).
     """
-    # TODO: same pattern as save_trajectory: open with mode "x" and
-    #       encoding="utf-8", json.dump(scores, f, indent=2, ensure_ascii=False),
-    #       return the path.
-    raise NotImplementedError
+
+    path = run_dir / "scores.json"
+
+    with path.open("x", encoding="utf-8") as f:
+        json.dump(scores, f, indent=2, ensure_ascii=False)
+
+    return path

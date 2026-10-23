@@ -39,7 +39,13 @@ def load_run_dataset(run_dir: Path) -> tuple[str, str]:
     # TODO 1: read run_dir / "run.json" (encoding="utf-8") with json.load.
     # TODO 2: return config["dataset"]["name"] and config["dataset"]["split"],
     #         where config is the "config" key saved by save_run_metadata.
-    raise NotImplementedError
+
+    path = run_dir / "run.json"
+
+    with path.open('r', encoding='utf-8') as f:
+        metadata = json.load(f)
+
+    return metadata["config"]["dataset"]["name"], metadata["config"]["dataset"]["split"]
 
 
 def main() -> None:
@@ -54,6 +60,7 @@ def main() -> None:
         Docker time, needs no API calls, and must be rerunnable on an old run
         without spending anything on the agent again.
     """
+
     # TODO 1: argparse:
     #           run_dir                positional, type=Path (e.g. runs/2026-10-21T00-57-20)
     #           --dataset-name         default None -> taken from run.json
@@ -74,7 +81,61 @@ def main() -> None:
     #         test fields are not None, passed/total for FAIL_TO_PASS and
     #         PASS_TO_PASS (e.g. "F2P 1/1, P2P 84/85"). Then the summary counts
     #         and scores_path.
-    raise NotImplementedError
+
+
+    parser = argparse.ArgumentParser(description = "Score run")
+    parser.add_argument("run_dir", type=Path, help="Provide a run directory, e.g runs/2026-10-21T00-57-20")
+    parser.add_argument("--dataset-name", default=None, help="Pass Dataset name used for the run")
+    parser.add_argument("--split", default=None, help="Pass the dataset split used for the run")
+    parser.add_argument("--max-workers", type=int, default=1, help="Pass the number of workers for parallel scoring")
+    parser.add_argument("--timeout", type=int, default=1800, help="Pass the duration for each instance test before timeout")
+
+    args = parser.parse_args()
+
+    dataset_name, split = load_run_dataset(args.run_dir)
+
+    # Note that here we are overwriting the dataset name and split
+    # if the command line provides a different datset. Only likely to occur if
+    # we are testing one dataset and scoring against another.
+
+    dataset_name = args.dataset_name if args.dataset_name is not None else dataset_name
+    split = args.split if args.split is not None else split
+
+    report = run_harness(args.run_dir, dataset_name, split, args.max_workers, args.timeout)
+    scores = collect_scores(args.run_dir, report, dataset_name, split)
+    score_path = save_scores(args.run_dir, scores)
+
+    for instance_id, instance_values in scores["instances"].items():
+        if instance_values["fail_to_pass"]is not None and instance_values["pass_to_pass"] is not None:
+
+            fail_to_pass = instance_values["fail_to_pass"]
+            pass_to_pass = instance_values["pass_to_pass"]
+
+            f2p_passed = len(fail_to_pass["success"])
+            f2p_total = f2p_passed + len(fail_to_pass["failure"])
+
+            p2p_passed = len(pass_to_pass["success"])
+            p2p_total = p2p_passed + len(pass_to_pass["failure"])
+
+            print(
+                f"Instance_id: {instance_id},",
+                f"status: {instance_values["status"]},",
+                f"F2P: {f2p_passed}/{f2p_total}, P2P: {p2p_passed}/{p2p_total}"
+            )
+
+        else:
+            print(
+                f"Instance_id: {instance_id}",
+                f"status = {instance_values["status"]}",
+            )
+
+    status_list = []
+    for status, count in scores["summary"].items():
+        status_list.append(f"{status} {count}")
+
+    status_string = ", ".join(status_list)
+    print(status_string, f"score_path: {score_path}")
+
 
 
 if __name__ == "__main__":
