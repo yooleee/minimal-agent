@@ -458,4 +458,18 @@ End to end, `score_run.py runs/2026-10-21T00-57-20 --dataset-name SWE-bench/SWE-
 - The summary, `logs/` and `scores.json` were all inside the run folder, with nothing in the project root and no container left behind.
 - Running the same command again raised `FileExistsError` and left `scores.json` unchanged.
 
-The other sympy runs from Step 6b, including the three that submitted without running `test_Mod`, are not scored yet.
+### Findings from scoring
+
+All 13 earlier runs on `sympy__sympy-15599` were scored with `--dataset-name SWE-bench/SWE-bench_Verified`, and none raised an error.
+
+| Result | Runs |
+|---|---|
+| resolved (F2P 1/1, P2P 80/80) | `00-48-59`, `03-30-07`, `03-44-27`, `00-57-20` |
+| unresolved (F2P 0/1, P2P 80/80) | `23-14-19`, `03-40-30`, `03-41-17`, `03-41-54` |
+| empty_patch | `23-11-14`, `00-44-28`, `00-46-55`, `00-48-03`, `00-48-35` |
+
+- **Running the existing tests decided the outcome.** All four resolved runs ran `test_Mod` or the whole of `test_arit.py` before `exit` (12 to 29 steps). None of the four unresolved runs did (5 to 11 steps). This comes from searching the assistant messages for the test names, not from reading every trajectory.
+- **Three unresolved runs submitted the same patch** (`23-14-19`, `03-40-30` and `03-41-17`, identical hashes). It is most likely the fix suggested in the issue, which Step 6b found fails on a float case.
+- **The failure is the FAIL_TO_PASS test itself.** All 80 PASS_TO_PASS tests passed in every run, so the unresolved patches broke nothing else. They did not fully fix the bug.
+- **The five empty patches are the early-exit runs from Step 6b**, from before the `PrematureExit` guard.
+- **Next lever (Stage 8).** The exit rule asks for output that verifies the fix, and the model often meets it with its own small check. Pointing the rule at the repository's own tests is the most promising change. This rests on one instance and should be checked on more before it is treated as general.
