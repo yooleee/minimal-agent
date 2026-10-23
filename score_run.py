@@ -101,8 +101,8 @@ def main() -> None:
 
         else:
             print(
-                f"Instance_id: {instance_id}",
-                f"status = {instance_values["status"]}",
+                f"Instance_id: {instance_id},",
+                f"status: {instance_values["status"]}",
             )
 
     status_list = []
