@@ -15,6 +15,7 @@
 import argparse
 import subprocess
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -184,21 +185,33 @@ def run_instance(instance_id: str, config: dict) -> dict:
         {"instance_id": str, "exit_status": str,
         "model_patch": str | None, "model": model_name from config,
         "step_count": int (from Agent), "started_at": str (ISO 8601 UTC timestamp),
-        "finished_at": str (ISO 8601 UTC timestamp), "duration_s": float (seconds)
-        "lm_calls": list[dict], "messages": list[dict]
+        "finished_at": str (ISO 8601 UTC timestamp), "duration_s": float (seconds),
+        "lm_calls": list[dict], "messages": list[dict],
+        "error": {"type", "message", "traceback"} | None
         }.
+
+        Note that on an errored patch run, model patch becomes the partial patch
+        at the point when the crash occurs and not a complete submission.
 
 
     Why:
         One function = one evaluation unit. Batch runs (Stage 8) will call this
         in a loop; scoring (Stage 7) will consume the records it returns.
+
     """
     instance = load_instance(instance_id, config["dataset"]["name"], config["dataset"]["split"])
     messages = build_messages(instance, config)
 
     env = DockerEnvironment(swebench_image_name(instance_id), **config["environment"])
     model_patch = None
+    error = None
+    # True once env.start() returns, so the except knows whether a container exists
+    # to capture from. A local flag, because the Environment Protocol has no container_id.
+    started = False
 
+    # Errors raised above this line (unknown id, bad config in Agent.__init__) are
+    # left to propagate on purpose: the same mistake would hit every instance in a
+    # batch, so failing fast beats recording N identical errors.
     agent = Agent(messages, env, model = config["model"]["name"], **config["agent"])
 
     try:
@@ -206,8 +219,20 @@ def run_instance(instance_id: str, config: dict) -> dict:
         start_clock = time.monotonic()
 
         env.start()
+        started = True
         exit_status = agent.run()
         model_patch = capture_patch(env, instance["base_commit"])
+
+    # Exception, not BaseException: Ctrl-C (KeyboardInterrupt) still stops the run.
+    # Broad on purpose: one instance failing for any reason must not stop a batch.
+    except Exception as e:
+        exit_status = "Error"
+        error = {"type": type(e).__name__, "message": str(e),"traceback": traceback.format_exc()}
+
+        # The partial patch is kept in the trajectory for diagnosis only.
+        # append_prediction writes null, so a crashed run is never scored.
+        if started:
+            model_patch = capture_patch(env, instance["base_commit"])
 
     finally:
         env.cleanup()
@@ -216,7 +241,7 @@ def run_instance(instance_id: str, config: dict) -> dict:
     duration_s = time.monotonic() - start_clock
 
     return {
-        "instance_id": instance_id, "exit_status": exit_status,
+        "instance_id": instance_id, "exit_status": exit_status, "error": error,
         "model_patch": model_patch, "model": config["model"]["name"],
         "step_count": agent.step_count, "started_at": started_at,
         "finished_at": finished_at, "duration_s": round(duration_s, 4),
@@ -254,10 +279,19 @@ def main() -> None:
 
     patch_chars = "Capture failed" if result['model_patch'] is None else len(result['model_patch'])
 
-    print(
-        f"instance_id = {result['instance_id']}", f"exit status = {result['exit_status']}",
-        f"patch_chars = {patch_chars}", f"Trajectory path = {trajectory_path}"
-    )
+    parts = [
+        f"instance_id: {result['instance_id']}",
+        f"exit status: {result['exit_status']}",
+        f"Trajectory path: {trajectory_path}"
+    ]
+
+    if result["error"] is not None:
+        parts.append(f"Error type: {result['error']['type']}")
+
+    else:
+        parts.append(f"patch_chars: {patch_chars}")
+
+    print(*parts)
 
 
 if __name__ == "__main__":

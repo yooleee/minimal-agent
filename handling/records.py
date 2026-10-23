@@ -181,15 +181,32 @@ def append_prediction(run_dir: Path, record: dict) -> None:
         None. Appends to run_dir / "preds.jsonl".
 
     Why:
-        These three keys are what the SWE-bench evaluation harness reads, so
+        The initial three keys are what the SWE-bench evaluation harness reads, so
         Stage 7 can score this file directly. JSONL (one JSON object per line)
         means each instance is one append: a batch that crashes halfway keeps
         every line already written, and nothing is ever rewritten.
+
+        The fourth key is used to record points where an instance run failed
+        in a batch. It records the type of error that occured to cause the
+        run failure. It is not used by the SWE-bench evaluation harness.
     """
+    # A crashed run is never a submission: its patch is null even when the
+    # trajectory holds a partial one. agent_error is written on every line (None
+    # for a normal run). The harness ignores the extra key and scores null as an
+    # empty patch (checked in swebench 5.0.2).
+    if record["error"] is not None:
+        model_patch = None
+        agent_error =  record["error"]["type"]
+
+    else:
+        model_patch = record["model_patch"]
+        agent_error =  None
+
     prediction = {
-        "instance_id": record["instance_id"],
-        "model_name_or_path": record["model"],
-        "model_patch": record["model_patch"]
+    "instance_id": record["instance_id"],
+    "model_name_or_path": record["model"],
+    "model_patch": model_patch,
+    "agent_error": agent_error
     }
 
     line = json.dumps(prediction, ensure_ascii=False)

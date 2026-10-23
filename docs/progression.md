@@ -14,7 +14,7 @@ Goal of the project: one SWE-bench (bash-only) instance per evaluation, run unat
 | 6 | Run record (config, messages, result) saved to disk | Done |
 | 6b | Per-call LM record, early-exit guard, prompt fixes | Done |
 | 7 | Scoring with the SWE-bench harness | Done |
-| 8 | Robustness and batch runs | Next |
+| 8 | Robustness and batch runs | In progress (8a done) |
 
 ---
 
@@ -473,3 +473,41 @@ All 13 earlier runs on `sympy__sympy-15599` were scored with `--dataset-name SWE
 - **The failure is the FAIL_TO_PASS test itself.** All 80 PASS_TO_PASS tests passed in every run, so the unresolved patches broke nothing else. They did not fully fix the bug.
 - **The five empty patches are the early-exit runs from Step 6b**, from before the `PrematureExit` guard.
 - **Next lever (Stage 8).** The exit rule asks for output that verifies the fix, and the model often meets it with its own small check. Pointing the rule at the repository's own tests is the most promising change. This rests on one instance and should be checked on more before it is treated as general.
+
+## Step 8a: Recording a run that raises
+
+**Goal.** Close the Step 6 known gap. Before this step, an exception from `agent.run()` (an API error, for example) left only `run.json`: the messages and LM calls already paid for were lost, and in a batch the error would also stop every instance after it. Stage 8 is split into 8a (this step), 8b (batch runner), 8c (failure labels in `scores.json`), 8d (baseline batch), 8e (exit-rule experiment) and 8f (this record).
+
+### Design decisions
+
+- **`run_instance` catches `Exception` around `env.start()`, `agent.run()` and patch capture.** The exceptions in `handling/exceptions.py` never reach it, because `Agent.run()` already catches them all. What does reach it comes from outside the harness: OpenAI errors, a failed image pull, or a bug not found yet. The catch is broad on purpose (fault isolation: one instance failing must not stop a batch). It stops at `Exception`, so Ctrl-C (`KeyboardInterrupt`) still ends the run.
+- **Errors before the `try` still raise.** An unknown instance id or a bad config in `Agent.__init__` would hit every instance in a batch, so failing fast beats recording the same error many times.
+- **The record gets `exit_status: "Error"` and an `error` field**, `{"type", "message", "traceback"}`, or `None` for a normal run. `type` is `type(e).__name__`, the same idiom `Agent.run` uses for its exit reasons, so it is a JSON string.
+- **A local `started` flag decides whether to capture a patch after a crash.** The `except` runs before the `finally`, so the container still exists if `start()` had returned. If `start()` itself raised, `capture_patch` would fail with "Container not started", so it is skipped. The flag is local because the `Environment` Protocol has no `container_id`.
+- **The partial patch stays in the trajectory, and the prediction gets `model_patch: null`.** A crashed run is never scored as a submission. The rule lives in `append_prediction`, which owns the predictions format.
+- **`preds.jsonl` gains a fourth key, `agent_error`**, holding the error type or `None`. It is written on every line, so `None` means "did not crash" rather than "older file". Older `preds.jsonl` files lack it, so scoring will read it with `.get()`. swebench 5.0.2 only requires `instance_id` in a prediction (`utils.get_predictions_from_file`), so the extra key is ignored, and `null` is scored as an empty patch. Without the marker, a crash would look like `capture_failed`. Leaving the instance out of `preds.jsonl` would drop it from the denominator.
+- **The summary line shows the error type instead of `patch_chars` on an errored run.** On a failed start, `model_patch` is `None` because capture never ran, and the old label would have said "Capture failed". Nothing in the project parses this line, so its contents can change freely.
+
+### Bugs found in review
+
+- **`"type": Exception`** stored the base class itself instead of the raised type, so every error read as `Exception`. A class object is also not JSON, so `save_trajectory` raised `TypeError` partway through writing and left a truncated trajectory that its mode `"x"` then blocked from being rewritten.
+- **The summary print:**
+  - The first version printed the error line and then the normal line, so an errored run printed twice, with the whole `error` dict including the traceback.
+  - `result["error"]["type"] is not None` as the condition indexed `None` on a normal run (`'NoneType' object is not subscriptable`). The check belongs on `result["error"]`.
+  - `... if ... else None` inside `print` still passed `None` as an argument, which printed. The fix builds a `parts` list, appends conditionally and calls `print(*parts)`.
+- **`append_prediction`:** the normal branch first lacked `agent_error`, and the two branches repeated the whole dict. The fix sets `model_patch` and `agent_error` in the `if/else` and builds the dict once.
+
+### Verification
+
+`main()` ran against Docker with `Agent.run` replaced by a stub (no API calls), in four cases:
+
+| Case | Summary line ends with | `preds.jsonl` (`agent_error`, `model_patch`) |
+|---|---|---|
+| `run()` edits a file, then raises `ConnectionError` | `Error type: ConnectionError` | `ConnectionError`, `null` |
+| `start()` raises `RuntimeError` | `Error type: RuntimeError` | `RuntimeError`, `null` |
+| Normal run with one edit | `patch_chars: 384` | `None`, 384 characters |
+| Normal run with `capture_patch` forced to `None` | `patch_chars: Capture failed` | `None`, `null` |
+
+- In the crash case, the trajectory kept the partial patch and the error's type, message and traceback. In the failed-start case it had no patch.
+- swebench's `get_predictions_from_file` loaded the crashed run's line with its extra key.
+- No container was left behind in any case.
