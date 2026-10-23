@@ -64,12 +64,6 @@ def read_predictions(run_dir: Path) -> dict[str, dict]:
         collect_scores (needs null vs "" for each patch) read this file. One
         reader means one place that knows its format.
     """
-    # TODO 1: path = run_dir / "preds.jsonl". Open it with encoding="utf-8"
-    #         (a missing file raises FileNotFoundError by itself, so no
-    #         separate exists() check is needed).
-    # TODO 2: one json.loads per non-empty line (JSONL: one object per line).
-    #         Skip blank lines, e.g. a trailing "\n" read as an empty line.
-    # TODO 3: return a dict keyed by each prediction's "instance_id".
 
     path = run_dir / "preds.jsonl"
     predictions = {}
@@ -127,8 +121,6 @@ def harness_report_path(run_dir: Path, model_name: str) -> Path:
         the file without parsing the harness's printed output. If a swebench
         upgrade changes the naming, this is the one function to update.
     """
-    # TODO: build the file name exactly as described in Returns. The "/" -> "__"
-    #       replacement matters for model names like "openai/gpt-...".
 
     return run_dir / f"{safe_model_name(model_name)}.{run_dir.name}.json"
 
@@ -166,31 +158,6 @@ def run_harness(
         harness runs with cwd=run_dir, so its logs land inside the run folder
         and everything about one run stays in one place.
     """
-
-    # TODO 1: predictions = read_predictions(run_dir). Take model_name from any
-    #         prediction (all lines share it, see the file header).
-    # TODO 2: build the argv as a list (no shell=True):
-    #           [sys.executable, "-m", HARNESS_MODULE,
-    #            "--dataset_name", dataset_name, "--split", split,
-    #            "--predictions_path", <preds.jsonl as an ABSOLUTE path>,
-    #            "--run_id", run_dir.name,
-    #            "--instance_ids", *<the instance ids in predictions>,
-    #            "--max_workers", str(max_workers), "--timeout", str(timeout),
-    #            "--report_dir", <run_dir as an ABSOLUTE path>]
-    #         Absolute paths because cwd changes to run_dir: a relative path
-    #         would then be resolved twice ("runs/x/runs/x/preds.jsonl").
-    #         sys.executable = the Python running this script, so the harness
-    #         runs in the same venv without a hard-coded .venv/bin path.
-    #         --instance_ids limits the harness to this run's instances.
-    #         Without it, the summary lists every other dataset instance as
-    #         "incomplete" (499 of 500 for a single-instance run).
-    # TODO 3: subprocess.run(argv, cwd=run_dir, check=False). Do NOT capture
-    #         output: the harness prints progress for minutes, and seeing it
-    #         live is the point. No subprocess timeout either: the harness
-    #         enforces --timeout per instance. (Stage 8 can add an overall one.)
-    # TODO 4: nonzero returncode -> raise RuntimeError naming the returncode.
-    # TODO 5: report = harness_report_path(run_dir, model_name). If it does not
-    #         exist, raise RuntimeError (the naming assumption broke). Else return it.
 
     predictions = read_predictions(run_dir)
     model_name = next(iter(predictions.values()))["model_name_or_path"]
@@ -252,31 +219,6 @@ def collect_scores(
         swebench_version is recorded because the scorer's version decides the
         result, the same way run.json records the harness commit.
     """
-
-    # TODO 1: summary = json.loads(harness_report.read_text(encoding="utf-8")).
-    #         The id lists used below: "resolved_ids", "unresolved_ids",
-    #         "error_ids", "empty_patch_ids". In 5.0.2 a predicted instance is
-    #         in exactly one of them (reporting.make_run_report checks empty
-    #         patch first, then report.json), so the order of checks below
-    #         does not change the result.
-    # TODO 2: predictions = read_predictions(run_dir).
-    # TODO 3: for each instance_id in predictions, pick its status:
-    #          - in empty_patch_ids: "capture_failed" if its model_patch is None,
-    #            else "empty_patch"
-    #          - in resolved_ids / unresolved_ids / error_ids: that status
-    #          - in none of them: raise ValueError (see Raises)
-    # TODO 4: tests: the per-instance report is at
-    #           run_dir / HARNESS_LOG_DIR / run_dir.name /
-    #           <model_name with "/" -> "__"> / instance_id / "report.json"
-    #         It is shaped {instance_id: {..., "tests_status": {"FAIL_TO_PASS":
-    #         {"success", "failure"}, "PASS_TO_PASS": {...}}}}.
-    #         If it exists, copy the two dicts. If not, set both to None.
-    #         (An error instance may have a report that is empty or not JSON:
-    #         catch json.JSONDecodeError and KeyError there and use None.)
-    # TODO 5: summary counts: one entry per status in STATUSES, including zeros,
-    #         so every scores.json has the same keys.
-    # TODO 6: swebench_version = version("swebench") (importlib.metadata).
-    #  TODO 7: return the dict described in Returns.
 
     summary = json.loads(harness_report.read_text(encoding="utf-8"))
     predictions = read_predictions(run_dir)

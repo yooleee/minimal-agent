@@ -13,8 +13,8 @@ Goal of the project: one SWE-bench (bash-only) instance per evaluation, run unat
 | 5 | Patch capture (`model_patch`) | Done |
 | 6 | Run record (config, messages, result) saved to disk | Done |
 | 6b | Per-call LM record, early-exit guard, prompt fixes | Done |
-| 7 | Scoring with the SWE-bench harness | Next |
-| 8 | Robustness and batch runs | Planned |
+| 7 | Scoring with the SWE-bench harness | Done |
+| 8 | Robustness and batch runs | Next |
 
 ---
 
@@ -393,3 +393,69 @@ All runs are on `sympy__sympy-15599`.
   - `pytest` is not installed in the image. In two runs the model ran the existing tests anyway: it imported `test_arit.py` directly, or used `bin/test`.
   - Both runs found that a fix like the issue's suggestion broke `test_Mod` on a float case, then iterated: 29 steps and 242 s, and 15 steps and 100 s.
   - Three of the earlier runs submitted after 5 to 11 steps without running `test_Mod`. Their patches may contain that regression. Stage 7 scoring will show it.
+
+## Step 7: Scoring with the SWE-bench harness
+
+**Goal.** Score a finished run folder with the official SWE-bench harness, and keep one status and the test results per instance next to the run.
+
+```
+runs/2026-10-21T00-57-20/
+  gpt-5.6-luna.2026-10-21T00-57-20.json  harness summary (all instances)
+  logs/run_evaluation/<run_id>/<model>/<instance_id>/
+    report.json                          per-instance test results
+    test_output.txt                      raw test log
+  scores.json                            our summary, written by score_run.py
+```
+
+Usage: `python score_run.py runs/<run_id>`. Runs made before the dataset switch also need `--dataset-name SWE-bench/SWE-bench_Verified`.
+
+### Design decisions
+
+- **swebench 5.0.2, pinned in `requirements.txt`.** The scorer's version decides the result, so it is pinned and recorded in every `scores.json`.
+- **The dataset moved from `princeton-nlp/SWE-bench_Verified` to `SWE-bench/SWE-bench_Verified`.** swebench 5.x reads `image`, `eval_script` and `log_parser` from each instance, and only the second has them. The two agree on every shared field except `PASS_TO_PASS` in 2 instances.
+- **Scoring is its own command.** `score_run.py` sits next to `run_single.py`. Scoring takes minutes of Docker time, needs no API calls, and can be rerun on an old run folder without rerunning the agent.
+- **The harness is called through its command line**, not its Python functions. The CLI is its public interface, while its internals changed between major versions. `sys.executable` runs it in the same Python environment without a hard-coded venv path.
+- **The harness runs with `cwd=run_dir`** and the run folder's name as its run id. Its summary and `logs/` land inside the run folder, so everything about one run stays in one place. `--instance_ids` limits it to the run's own instances. Without it, every other dataset instance is listed as "incomplete".
+- **Five statuses:** `resolved`, `unresolved`, `empty_patch`, `capture_failed` and `error`.
+  - The harness counts `model_patch: null` and `""` both as an empty patch. `collect_scores` splits them again using `preds.jsonl`, so a failed capture stays different from "the agent changed nothing".
+  - `error` (the harness could not evaluate) stays different from `unresolved` (the tests ran and failed).
+  - The harness's own "incomplete" means "in the dataset but not predicted", so it never applies here.
+  - An instance in none of the harness's id lists raises `ValueError`, because that means the report format was misread.
+- **Test results are `None` when no tests ran** (no `report.json`, or one that cannot be read). That is different from empty lists. Each instance keeps `fail_to_pass` and `pass_to_pass` as `{"success": [...], "failure": [...]}`, so an unresolved instance can be diagnosed from `scores.json` alone.
+- **`safe_model_name`** holds the harness rule that turns `/` in a model name into `__`. The summary file name and the log folder both depend on it, so it lives in one place.
+- **`--dataset-name` and `--split` override `run.json`.** By default a run is scored against the data the agent saw. The override exists for runs made before the dataset switch, and the dataset actually used is recorded in `scores.json`.
+- **`scores.json` opens with mode `"x"`**, following the Step 6 rule that nothing is silently overwritten. To rescore, delete `scores.json` and `logs/` first. The harness skips any instance that already has a `report.json` for that run id.
+- **`read_predictions` raises `ValueError` for an empty `preds.jsonl`.** A missing file (`FileNotFoundError`) and a file with no predictions are different states, and the empty case would otherwise surface as a bare `StopIteration`.
+- **Known limitation.** The harness also labels some `unresolved` and `error` instances as likely infrastructure failures or ambiguous failures (`infra_failure_ids`, `ambiguous_failure_ids`, `failure_reasons`). These are extra labels, not extra statuses. `scores.json` does not record them yet, so an instance that failed because of Docker looks the same as one whose patch was wrong. Batch runs (Stage 8) will need this, and it fits as one more per-instance field.
+
+### Bugs found in review
+
+- **`read_predictions`** parsed the whole file with `json.loads(f.read())` instead of one line at a time. The first empty-file check used `predictions is Empty`, where `Empty` was `queue.Empty`, imported automatically by the editor. `{} is Empty` is always false, so the check never fired.
+- **`run_harness`** looked up the model name with `predictions["instance_id"]`, which is not a key of the dict. A relative `--report_dir` combined with the changed `cwd` would have nested the folder.
+- **`collect_scores`:**
+  - It wrote statuses into the harness summary and into the prediction dicts instead of a local `instances`. A typo (`captured_failed`) raised `KeyError` in the counts.
+  - The first version of the test results read `report.json` without checking that it exists, skipped the `instance_id` level and misspelled `tests_status`.
+  - Lowercase keys were used to read the harness file, whose keys are uppercase. The broad `except KeyError` caught that and recorded a resolved run as "no tests ran", with no error.
+  - Trailing commas turned both test results into one-item tuples.
+- **`save_scores`** was copied from `save_trajectory` and built the path from `scores["instance_id"]`, which does not exist in a run-level dict.
+- **Renaming the helper** changed the definition but not its two call sites, which raised `NameError`.
+- **`load_run_dataset`** passed `encoding` to `json.load` instead of `open`, and skipped the `config` level of `run.json`.
+- **`main`** parsed `--dataset-name` but never used it. The first per-instance print took `len()` of the test dicts (always 2 keys), which printed `0.5` for an instance that passed every test.
+
+### Verification
+
+`collect_scores` was run on copies of a real scored run:
+
+- The real run gives `resolved`, F2P 1/1 and P2P 80/80.
+- `null` and `""` patches give `capture_failed` and `empty_patch`, with `None` test results.
+- An empty `report.json` keeps the harness status and gives `None` test results.
+- An instance missing from every id list raises `ValueError`.
+- A missing `preds.jsonl` raises `FileNotFoundError`, and an empty one raises `ValueError`.
+
+End to end, `score_run.py runs/2026-10-21T00-57-20 --dataset-name SWE-bench/SWE-bench_Verified` ran the harness in Docker (about 25 s for one instance):
+
+- The printed line was `sympy__sympy-15599 status = resolved F2P 1/1, P2P 80/80`.
+- The summary, `logs/` and `scores.json` were all inside the run folder, with nothing in the project root and no container left behind.
+- Running the same command again raised `FileExistsError` and left `scores.json` unchanged.
+
+The other sympy runs from Step 6b, including the three that submitted without running `test_Mod`, are not scored yet.
