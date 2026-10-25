@@ -35,11 +35,11 @@ HARNESS_MODULE = "swebench.harness.run_evaluation"
 HARNESS_LOG_DIR = Path("logs") / "run_evaluation"
 
 # One status per instance. Kept distinct on purpose: the harness merges a
-# failed capture (model_patch null) into "empty patch", and "error" (the
+# failed capture (model_patch null) and agent_error into "empty patch", and "error" (the
 # harness could not evaluate) is not the same as "unresolved" (tests failed).
 # The harness's own "incomplete" means "in the dataset but not predicted", so
 # it never applies to an instance in preds.jsonl and is not a status here.
-STATUSES = ("resolved", "unresolved", "empty_patch", "capture_failed", "error")
+STATUSES = ("resolved", "unresolved", "empty_patch", "capture_failed", "agent_error", "error")
 
 
 def read_predictions(run_dir: Path) -> dict[str, dict]:
@@ -203,10 +203,17 @@ def collect_scores(
          "instances": {instance_id: {
              "status": one of STATUSES,
              "fail_to_pass": {"success": [...], "failure": [...]} | None,
-             "pass_to_pass": {"success": [...], "failure": [...]} | None}}}
+             "pass_to_pass": {"success": [...], "failure": [...]} | None
+             "failure_label": "infra", "ambiguous" | None
+             "failure_reason": str | None }}}
+
         The test fields are None when no tests ran (empty patch, capture
-        failed, or an error before a report was written), which is
+        failed, agent_error, or an error before a report was written), which is
         different from empty lists.
+
+        None has two meanings that status tells apart. For unresolved
+        and error it means "classified, no infrastructure signal". For every
+        other status the harness never classifies, so the label does not apply.
 
     Raises:
         ValueError: if an instance in preds.jsonl is in none of the harness's
@@ -230,7 +237,12 @@ def collect_scores(
     for instance_id, prediction in predictions.items():
         if instance_id in summary["empty_patch_ids"]:
 
-            if prediction["model_patch"] is None:
+            # agent_error first: a crashed run also has model_patch null.
+            # .get() because preds.jsonl from before Step 8a has no such key.
+            if prediction.get("agent_error") is not None:
+                status = "agent_error"
+
+            elif prediction["model_patch"] is None:
                 status = "capture_failed"
 
             else:
@@ -267,10 +279,26 @@ def collect_scores(
             except(json.JSONDecodeError, KeyError):
                 pass
 
+        # The harness classifies only unresolved and error instances (swebench
+        # 5.0.2 reporting.py). The label lists use [] so a changed report format
+        # fails loudly. failure_reasons only holds classified ids, hence .get().
+        if instance_id in summary["infra_failure_ids"]:
+            failure_label = "infra"
+
+        elif instance_id in summary["ambiguous_failure_ids"]:
+            failure_label = "ambiguous"
+
+        else:
+            failure_label = None
+
+        failure_reason = summary["failure_reasons"].get(instance_id)
+
         instances[instance_id] = {
             "status": status,
             "fail_to_pass": fail_to_pass,
             "pass_to_pass": pass_to_pass,
+            "failure_label": failure_label,
+            "failure_reason": failure_reason
 
         }
 

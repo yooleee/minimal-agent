@@ -14,7 +14,7 @@ Goal of the project: one SWE-bench (bash-only) instance per evaluation, run unat
 | 6 | Run record (config, messages, result) saved to disk | Done |
 | 6b | Per-call LM record, early-exit guard, prompt fixes | Done |
 | 7 | Scoring with the SWE-bench harness | Done |
-| 8 | Robustness and batch runs | In progress (8a, 8b done) |
+| 8 | Robustness and batch runs | In progress (8a to 8c done) |
 
 ---
 
@@ -576,3 +576,51 @@ End to end, `run_batch.py --instances-file` ran three real Verified ids against 
 - No container was left behind.
 
 `run_single.py` still writes all three files for a normal and a crashed stub run, its `run.json` holds `instance_ids: [id]`, and `score_run.load_run_dataset` reads it.
+
+## Step 8c: Failure labels and the agent_error status
+
+**Goal.** Close the Step 7 known limitation, so `scores.json` tells an instance that failed because of the environment apart from one whose patch was wrong. Also give the crashed runs from Step 8a their own status instead of letting them read as failed captures.
+
+### Design decisions
+
+- **`agent_error` is a sixth status.** The harness counts a `null` patch as an empty patch, and a crashed run's prediction has `model_patch: null`. `collect_scores` already split `capture_failed` from `empty_patch` using `preds.jsonl`. It now checks `agent_error` first in that branch, because a crash also has a `null` patch and would otherwise read as `capture_failed`. The order is `agent_error`, then `capture_failed`, then `empty_patch`. The summary counts are built from `STATUSES`, so they include the new status without other changes.
+- **`.get("agent_error")` for older files.** `preds.jsonl` from before Step 8a has no such key, and `.get()` returns `None`, which correctly means "no agent error".
+- **The harness's failure labels are extra fields, not statuses.** swebench 5.0.2 (`harness/infra_failure.py`, used from `reporting.py`) reads the logs of every `unresolved` and `error` instance after scoring and matches them against fixed patterns, first match winning. Each pattern has a reason code and a tier. Environment patterns (`out_of_memory`, `container_unavailable`, `network_unreachable` and others) put the id in `infra_failure_ids`. Patterns a bad patch could also cause (`missing_module`) put it in `ambiguous_failure_ids`. The reason code goes in `failure_reasons`. The ids stay in `unresolved_ids` or `error_ids`, so the denominator is unchanged. Each instance in `scores.json` gains:
+  - `failure_label`: `"infra"`, `"ambiguous"` or `None`.
+  - `failure_reason`: the reason code or `None`. The label says how far to trust the reason, and the reason says what to fix.
+- **`None` has two meanings, and `status` tells them apart.** For `unresolved` and `error` it means the harness checked and found no environment pattern. For every other status the harness never checks, so the label does not apply. A third value was not added because the meaning follows from `status`.
+- **`[]` for the label lists, `.get()` for the reason.** `infra_failure_ids`, `ambiguous_failure_ids` and `failure_reasons` are always present in the pinned 5.0.2 report, so a missing key means the format changed and should fail loudly. `failure_reasons` only holds classified ids, so a missing id there is normal.
+- **`score_run.py` builds each line from a parts list**, the same pattern as `run_single.run_and_save`. The label can appear with or without test results (`unresolved` with `infra`, or `error` with no `report.json`), so adding it to two separate print calls would have repeated the condition. The parts are separated by spaces only. Trailing commas on parts had left a comma at the end of some lines and none between others.
+
+### Bugs found in review
+
+- `predictions.get("agent_error")` read from the dict of all predictions, whose keys are instance ids, so it was always `None`. The loop variable is `prediction`.
+- `if not prediction.get("agent_error")` inverted the test. Every normal empty patch became `agent_error` and every crash became `capture_failed`. The check is `is not None`.
+- `summary["summary_reasons"]` for the key `failure_reasons` raised `KeyError` on every instance, including resolved ones.
+- `... if not None else None` was a conditional that always took its first branch, because `not None` is `True`.
+- The first print version showed the reason without the label, so an ambiguous `missing_module` read the same as an infra failure.
+
+### Verification
+
+`collect_scores` ran on copies of the scored run `2026-10-21T00-57-20`, with its harness summary and `preds.jsonl` edited per case. None of our real runs has an environment failure, so the labels were set by hand.
+
+| Case | Status | Label, reason |
+|---|---|---|
+| The real resolved run | `resolved` | `None`, `None` |
+| Unresolved, not classified | `unresolved` | `None`, `None` |
+| Unresolved, in `infra_failure_ids` | `unresolved` | `infra`, `out_of_memory` |
+| Unresolved, in `ambiguous_failure_ids` | `unresolved` | `ambiguous`, `missing_module` |
+| `null` patch with `agent_error: "ConnectionError"` | `agent_error` | `None`, `None` |
+| `null` patch with `agent_error: None` | `capture_failed` | `None`, `None` |
+| `null` patch, old line with no `agent_error` key | `capture_failed` | `None`, `None` |
+| `""` patch | `empty_patch` | `None`, `None` |
+
+`score_run.main()` ran on three of these copies with the harness call replaced by the edited summary:
+
+```
+Instance_id: sympy__sympy-15599 status: resolved F2P: 1/1 P2P: 80/80
+Instance_id: sympy__sympy-15599 status: unresolved F2P: 1/1 P2P: 80/80 Failure_reason: out_of_memory Failure label: infra
+Instance_id: sympy__sympy-15599 status: error Failure_reason: missing_module Failure label: ambiguous
+```
+
+The last case also had its `report.json` removed, so it shows the label on a line without test results.

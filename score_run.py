@@ -82,6 +82,12 @@ def main() -> None:
     score_path = save_scores(args.run_dir, scores)
 
     for instance_id, instance_values in scores["instances"].items():
+
+        parts =  [
+            f"Instance_id: {instance_id}",
+            f"status: {instance_values["status"]}",
+        ]
+
         if instance_values["fail_to_pass"]is not None and instance_values["pass_to_pass"] is not None:
 
             fail_to_pass = instance_values["fail_to_pass"]
@@ -93,17 +99,14 @@ def main() -> None:
             p2p_passed = len(pass_to_pass["success"])
             p2p_total = p2p_passed + len(pass_to_pass["failure"])
 
-            print(
-                f"Instance_id: {instance_id},",
-                f"status: {instance_values["status"]},",
-                f"F2P: {f2p_passed}/{f2p_total}, P2P: {p2p_passed}/{p2p_total}"
-            )
+            parts.append(f"F2P: {f2p_passed}/{f2p_total} P2P: {p2p_passed}/{p2p_total}")
 
-        else:
-            print(
-                f"Instance_id: {instance_id},",
-                f"status: {instance_values["status"]}",
-            )
+
+        if instance_values["failure_reason"] is not None:
+            parts.append(f"Failure_reason: {instance_values["failure_reason"]}")
+            parts.append(f"Failure label: {instance_values["failure_label"]}")
+
+        print(*parts)
 
     status_list = []
     for status, count in scores["summary"].items():
@@ -111,8 +114,6 @@ def main() -> None:
 
     status_string = ", ".join(status_list)
     print(status_string, f"score_path: {score_path}")
-
-
 
 if __name__ == "__main__":
     main()
