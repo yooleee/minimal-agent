@@ -4,9 +4,9 @@
 # Responsible for: Writing everything a run leaves on disk: the run folder,
 #                  run.json (config + harness version), one trajectory per
 #                  instance, and the predictions file for scoring.
-# Role in project: Called by run_single.main() after run_instance() returns.
-#                  Kept out of run_single.py so the Stage 8 batch runner can
-#                  import the same functions with one shared run_dir.
+# Role in project: Called by run_single.run_and_save() after each instance,
+#                  and by run_single.main() / run_batch.main() for run.json.
+#                  A batch shares one run_dir across all its instances.
 # Layout:          runs/<UTC timestamp>/
 #                      run.json                    written once, before any instance
 #                      <instance_id>.traj.json     one per instance
@@ -113,12 +113,13 @@ def _harness_git_state() -> dict:
     return {"commit": commit, "dirty": dirty}
 
 
-def save_run_metadata(run_dir: Path, config: dict) -> None:
+def save_run_metadata(run_dir: Path, config: dict, instance_ids: list[str]) -> None:
     """
     Write run.json: the resolved config plus how and when the run was started.
 
     Args:
         run_dir: Folder from make_run_dir().
+        instance_ids: list of the run instance ids - list[str]
         config: The loaded config dict (from load_config).
 
     Returns:
@@ -127,14 +128,17 @@ def save_run_metadata(run_dir: Path, config: dict) -> None:
     Why:
         Saves the config VALUES, not the YAML path, because the file can change
         after the run. Written before any instance runs, so even a run that
-        crashes leaves a record of what it was trying to do.
+        crashes leaves a record of what it was trying to do. instance_ids is
+        the plan: preds.jsonl only lists instances that finished, so a stopped
+        batch can be told apart from one that never requested an id.
     """
     metadata = {
         "started_at": datetime.now(timezone.utc).isoformat(),
         "harness": _harness_git_state(),
         "python": sys.version,
         "argv": sys.argv,
-        "config": config
+        "config": config,
+        "instance_ids": instance_ids
     }
 
     path = run_dir / "run.json"

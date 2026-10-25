@@ -14,7 +14,7 @@ Goal of the project: one SWE-bench (bash-only) instance per evaluation, run unat
 | 6 | Run record (config, messages, result) saved to disk | Done |
 | 6b | Per-call LM record, early-exit guard, prompt fixes | Done |
 | 7 | Scoring with the SWE-bench harness | Done |
-| 8 | Robustness and batch runs | In progress (8a done) |
+| 8 | Robustness and batch runs | In progress (8a, 8b done) |
 
 ---
 
@@ -511,3 +511,68 @@ All 13 earlier runs on `sympy__sympy-15599` were scored with `--dataset-name SWE
 - In the crash case, the trajectory kept the partial patch and the error's type, message and traceback. In the failed-start case it had no patch.
 - swebench's `get_predictions_from_file` loaded the crashed run's line with its extra key.
 - No container was left behind in any case.
+
+## Step 8b: Batch runner
+
+**Goal.** Run several instances, one after another, into one run folder that `score_run.py` can score as a whole: `python run_batch.py <id> [<id> ...]` or `python run_batch.py --instances-file <path>`.
+
+```
+runs/2026-10-25T10-07-18/
+  run.json                           config, harness version, and the planned instance_ids
+  <instance_id>.traj.json            one per instance, written as each one finishes
+  preds.jsonl                        one line per finished instance
+```
+
+### Design decisions
+
+- **`run_and_save(run_dir, instance_id, config)` in `run_single.py`** holds the per-instance steps: run, save the trajectory, append the prediction, print the summary line, return the record. Both `run_single.main()` and `run_batch.main()` call it, so the two entry points cannot drift apart. Saving inside the helper means a batch that stops halfway keeps every instance already finished.
+- **`run_batch.py` imports from `run_single`** (`run_and_save`, `load_config` and the default paths) instead of a new shared module. `main()` is guarded, so the import has no side effects. If `run_single.py` is ever retired, these move to a shared module.
+- **`run.json` records `instance_ids`**, the ids the run planned to attempt, in order. `preds.jsonl` only lists instances that finished, so without it a batch stopped by Ctrl-C could not be told apart from one that never requested the missing ids. Single runs write `[id]`, so every `run.json` has the same keys.
+- **`validate_instance_ids` runs before `make_run_dir`**, so a bad list leaves no empty folder and costs nothing. It rejects:
+  - an empty list.
+  - duplicates, because `save_trajectory` opens with mode `"x"` and a second run of the same id would be paid for, then fail outside `run_instance`'s catch and stop the batch.
+  - ids missing from the configured dataset and split. The dataset is loaded once and its `instance_id` column turned into a set, so each lookup is direct. In `datasets` 5.x that column is a `Column` object, not a list, but it is iterable.
+
+  Each error lists every bad id at once. Cheap checks come first, so an empty or duplicated list never loads the dataset.
+- **`read_instances_file` keeps file order and does not remove duplicates.** A mistake in the file is reported by validation instead of being silently fixed.
+- **Exactly one id source.** Positional ids and `--instances-file` are both optional to argparse. `main()` checks `bool(ids) == bool(file)`, which is true when both or neither are given, and calls `parser.error`, which prints the usage and exits with code 2.
+- **Progress and tally.** `enumerate(..., start=1)` gives the `[2/8]` count, printed before each instance so the slow part shows which one is running. A `collections.Counter` tallies each record's `exit_status` (a missing key counts as 0), printed at the end as `Submitted 2, Error 1` with the `score_run.py` command to run next.
+- **Sequential on purpose.** Under amd64 emulation on Apple Silicon, parallel containers mostly compete for CPU. Revisit with an x86 host or batches of more than about 50.
+- **Deferred:** `--resume` (skip ids already in `preds.jsonl`) and removing each image after its run. Each SWE-bench image is about 4 GB, so the second becomes necessary past roughly 10 to 20 instances.
+- **Accepted cost.** `run_instance` still calls `load_instance` per instance, which reads the dataset from the local Hugging Face cache each time. If that becomes slow, `run_instance` can take the dataset row instead.
+
+### Bugs found in review
+
+- **`save_run_metadata`:**
+  - The first call passed `args.instance_id`, a string, where a list was expected. Python does not check the hint, so `run.json` would have stored a bare id, and code looping over it would see characters.
+  - With the argument order changed in the definition but the edited caller not yet saved, `run.json` stored the config under `instance_ids` and the id list under `config`, which `score_run.load_run_dataset` could not read. The saved call matches the definition.
+- **`run_single.main()`** briefly created the folder and `run.json` without calling `run_and_save`, so nothing ran.
+- **`read_instances_file`:** `line.strip()` on its own line discarded the result (strings are immutable), and `if line is not None` was always true (a blank line is `"\n"`, not `None`). Both ids and blank lines kept their newline.
+- **`run_batch.main()`:**
+  - `args.instance_file` for the attribute argparse names `instances_file`, and `args.run_dir` for `output_dir`.
+  - `bool(a) == bool(b) is True` is a chained comparison, `(a == b) and (b is True)`, so "neither source" slipped through.
+  - The ids always came from the file, and then the file branch assigned the `Path` itself instead of reading it (`TypeError: 'PosixPath' object is not iterable`).
+  - `config["dataset"]["items"]` for the key `name`.
+  - `print("Tally:", {status_string})` built a set, because braces outside an f-string are a set literal.
+
+### Verification
+
+Argument and validation cases, with no run folder created in any of them:
+
+| Input | Result |
+|---|---|
+| ids and `--instances-file` | argparse error |
+| neither | argparse error |
+| `sympy__sympy-1559` (typo) | `ValueError` naming it, with dataset and split |
+| two typos around a real id | `ValueError` naming exactly the two typos, in input order |
+| `[]` / `['a','b','a']` | empty-list error / `Duplicates found ... ['a']` |
+| a file with blank lines and padded ids | ids read in order, stripped, then validated |
+
+End to end, `run_batch.py --instances-file` ran three real Verified ids against Docker with `Agent.run` replaced by a stub that edits a file and raises `ConnectionError` on the second instance (no API calls). All three ran on the local sympy image to avoid pulling about 8 GB, so capture failed for the other two, whose base commits are not in that repo.
+
+- Progress lines `[1/3]` to `[3/3]` printed, and the crash on the second instance did not stop the third.
+- One run folder held three trajectories, three `preds.jsonl` lines (the second with `agent_error: ConnectionError` and `model_patch: null`) and `run.json` with all three ids in order.
+- The last line was `Tally: Submitted 2, Error 1` with the `score_run.py` command.
+- No container was left behind.
+
+`run_single.py` still writes all three files for a normal and a crashed stub run, its `run.json` holds `instance_ids: [id]`, and `score_run.load_run_dataset` reads it.

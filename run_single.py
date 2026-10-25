@@ -4,9 +4,10 @@
 # Responsible for: Running the agent on ONE SWE-bench instance end to end:
 #                  load the instance, build the prompt, build the environment
 #                  and agent, run, and always clean up the container.
-# Role in project: The entry point (replaces get_instance.py, problem.txt and
-#                  the __main__ block in class_agent.py). Later stages call
-#                  run_instance() once per instance for batch runs.
+# Role in project: The single-instance entry point (replaces get_instance.py,
+#                  problem.txt and the __main__ block in class_agent.py).
+#                  run_batch.py imports run_and_save() and load_config() from
+#                  here and calls run_and_save() once per instance.
 # Assumptions:     Run from the project root (so `config.` and `handling.`
 #                  imports resolve). OPENAI_API_KEY in .env. Docker running.
 #                  Instance ids use SWE-bench's double underscore form.
@@ -249,6 +250,47 @@ def run_instance(instance_id: str, config: dict) -> dict:
     }
 
 
+def run_and_save(run_dir: Path, instance_id: str, config: dict) -> dict:
+    """
+    Run one instance, save its trajectory and prediction, and print its summary line.
+
+    Args:
+        run_dir: Folder from make_run_dir(), shared by every instance in a batch.
+        instance_id: SWE-bench instance id.
+        config: The loaded config dict (from load_config).
+
+    Returns:
+        The record from run_instance(), so a batch can tally exit statuses.
+
+    Why:
+        The per-instance steps are the same for one instance and for a batch.
+        One helper means run_single.main() and run_batch.main() can't drift
+        apart (DRY). Saving inside the helper, right after each instance, is what
+        keeps a batch that dies halfway from losing the instances already done.
+    """
+    result = run_instance(instance_id, config)
+
+    trajectory_path = save_trajectory(run_dir, result)
+    append_prediction(run_dir, result)
+
+    patch_chars = "Capture failed" if result['model_patch'] is None else len(result['model_patch'])
+
+    parts = [
+        f"instance_id: {result['instance_id']}",
+        f"exit status: {result['exit_status']}",
+        f"Trajectory path: {trajectory_path}"
+    ]
+
+    if result["error"] is not None:
+        parts.append(f"Error type: {result['error']['type']}")
+
+    else:
+        parts.append(f"patch_chars: {patch_chars}")
+
+    print(*parts)
+    return result
+
+
 def main() -> None:
     """
     Parse the command line and run one instance.
@@ -270,28 +312,8 @@ def main() -> None:
     config = load_config(args.config)
 
     run_dir = make_run_dir(args.output_dir)
-    save_run_metadata(run_dir, config)
-
-    result = run_instance(args.instance_id, config)
-
-    trajectory_path = save_trajectory(run_dir, result)
-    append_prediction(run_dir, result)
-
-    patch_chars = "Capture failed" if result['model_patch'] is None else len(result['model_patch'])
-
-    parts = [
-        f"instance_id: {result['instance_id']}",
-        f"exit status: {result['exit_status']}",
-        f"Trajectory path: {trajectory_path}"
-    ]
-
-    if result["error"] is not None:
-        parts.append(f"Error type: {result['error']['type']}")
-
-    else:
-        parts.append(f"patch_chars: {patch_chars}")
-
-    print(*parts)
+    save_run_metadata(run_dir, config, [args.instance_id])
+    run_and_save(run_dir, args.instance_id, config)
 
 
 if __name__ == "__main__":
