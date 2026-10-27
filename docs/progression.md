@@ -14,7 +14,7 @@ Goal of the project: one SWE-bench (bash-only) instance per evaluation, run unat
 | 6 | Run record (config, messages, result) saved to disk | Done |
 | 6b | Per-call LM record, early-exit guard, prompt fixes | Done |
 | 7 | Scoring with the SWE-bench harness | Done |
-| 8 | Robustness and batch runs | In progress (8a to 8c done) |
+| 8 | Robustness and batch runs | In progress (8a to 8c done, 8d dev set drawn) |
 
 ---
 
@@ -624,3 +624,56 @@ Instance_id: sympy__sympy-15599 status: error Failure_reason: missing_module Fai
 ```
 
 The last case also had its `report.json` removed, so it shows the label on a line without test results.
+
+## Step 8d: Baseline batch on a dev set
+
+**Goal.** Measure the current harness on more than one instance, as the baseline that the Step 8e exit-rule variant is compared against. This section records the dev set and the decisions behind it. The batch results are added when the run is done.
+
+### The dev set
+
+`instances/dev_25_seed1234.txt` holds 25 SWE-bench Verified ids, drawn with seed 1234 and excluding `sympy__sympy-15599`, which already has 13 runs.
+
+| Repo owner | astropy | django | pydata | pytest-dev | scikit-learn | sphinx-doc | sympy |
+|---|---|---|---|---|---|---|---|
+| Instances | 4 | 8 | 2 | 2 | 1 | 4 | 4 |
+
+Verified has 500 instances across 12 repos (django 231, sympy 75, sphinx 44, matplotlib 34, scikit-learn 32, astropy 22, xarray 22, pytest 19, pylint 10, requests 8, seaborn 2, flask 1). The draw has fewer django instances than that (8 of 25 against 46%), which is normal sampling noise at this size. It was kept as drawn, because redrawing until the mix looks right would turn a random sample into a chosen one.
+
+### Design decisions
+
+- **Size: 25 instances (5% of Verified), on gpt-5.6-luna.** The size was chosen from cost, time and precision:
+  - Cost was estimated from the 7 working sympy runs, using gpt-5.6-luna's prices per 1M tokens ($0.20 input, $0.02 cached input, $1.20 output). About 87% of their input was billed at the cached rate. `query_lm` uses the automatic prompt cache, so explicit cache-write prices were taken not to apply. Output includes reasoning tokens.
+  - That gives a mean of about $0.013 per run, so about $0.32 for 25 instances. Every step resends the whole history, so input grows faster than the step count. A run at the 50-step limit is estimated at about $0.08 (the 29-step run's input scaled by (50/29)²), which puts the ceiling for 25 instances at about $2.05. Step 8e repeats the run, so the total is about double.
+  - All 7 runs are on one sympy instance, so the typical figure is the least certain number. The ceiling is a real bound, because `max_steps` caps every run.
+  - Wall time is about 2 to 3 hours for 25 (an image pull, 0.5 to 4 minutes of agent time and some scoring per instance).
+  - With 25 instances, a resolved rate has a 95% interval of roughly ±20 percentage points, so only large effects will show. Step 8e compares on the same instances, which helps.
+  - gpt-6-luna would cost about half as much, but it would be a different agent, and every finding so far was measured on gpt-5.6-luna. Steps 8d and 8e must use the same model, or the comparison would mix two changes.
+- **Docker disk.** Docker reports 860 GB free, and each image is about 4 GB, so 25 images need about 100 GB. This corrects the Step 8b estimate that removing images would be necessary past 10 to 20 instances. On this machine it is not needed at this scale.
+- **`sample_instances.py` draws the sample.** `sample_ids` sorts the candidate ids before sampling, so the result depends only on the set of ids and the seed, not on the dataset's row order. It uses `random.Random(seed)`, a private generator that nothing else can advance. It never changes the caller's list, and it raises `ValueError` for an excluded id that is not in the dataset (most likely a typo) or for `n` larger than the ids left. The dataset and split come from the config, so the sample is drawn from the data the batch validates against.
+- **The ids file is the source of truth, and the seed is a record.** Python does not promise that `random.sample` gives the same result across versions. The file starts with `#` lines giving the seed, dataset, split, `n`, exclusions and creation time, so the sample can be traced and redrawn. `run_batch.read_instances_file` skips `#` lines. `write_ids_file` creates `path.parent` and opens with mode `"x"`.
+- **`instances/` is a new top-level folder.** The ids file is an input to batches and must be tracked. `config/` holds run settings and code (it is a Python package), and `runs/` holds gitignored outputs.
+- **The dev set is for tuning.** Once Step 8e is tuned against it, any number reported afterwards needs a separate held-out set.
+- **`HF_TOKEN` in `.env`.** `run_instance` calls `load_instance` once per instance, and each call checks the Hugging Face Hub even when the data is cached. That call is outside the `try` that records errors, so a refused request would stop the batch instead of being recorded. A token raises the rate limit. `class_agent.py` already loads `.env` with `load_dotenv()`, and `huggingface_hub` reads `HF_TOKEN` when it makes a request, so no code change was needed. `.env` is gitignored. `HF_HUB_OFFLINE=1` would avoid the Hub entirely, but it must be set in the shell, because it is read when `datasets` is imported, before `.env` is loaded.
+
+### Bugs found in review
+
+- **`sample_ids`:** `all_ids.pop(instance_id)` passed a value to `list.pop`, which takes a position (`TypeError`), and would have changed the caller's list. The fix builds a separate `candidates` list from `sorted(all_ids)`. One error message had a stray `f` inside the string, so it printed `candidates f19`.
+- **`write_ids_file`:**
+  - It first called `path.write_text` inside the `with` block. That method opens the file itself, in mode `"w"`, and replaces the whole file on every call. The block also had no `as f`. The fix writes through `f.write`.
+  - A doubled `"\n"` put a blank line after each header line.
+  - The parent folder was hardcoded (`Path("run/instances")`, then `Path("instances")`), so writing anywhere else raised `FileNotFoundError`. The fix is `path.parent.mkdir(...)`.
+- **`main()`:**
+  - `load_dataset(name, split)` passed the split as the second positional argument, which is the sub-configuration name (`BuilderConfig 'test' not found`), and unpacked the single returned `Dataset` into two names. The next version passed the dataset as `name=`, leaving the required `path` empty.
+  - `write_ids_file(args.config, ...)` would have written the sample over `config/default.yaml`. Mode `"x"` refused, and the file was checked unchanged.
+  - `args.excluded` for the attribute `exclude`.
+  - `f"dataset={dataset}"` printed the `Dataset` object instead of its name.
+  - `Counter(ids)` counted each id once instead of counting the repo prefixes.
+- **`read_instances_file`** did not skip `#` lines, so the header would have been rejected as unknown ids.
+
+### Verification
+
+`sample_ids` on a fake list of 20 ids: the same seed gives the same sample and another seed a different one, the output is sorted, the caller's list is unchanged, an excluded id was never picked across 200 seeds, and both `ValueError` cases fire.
+
+`write_ids_file` created two missing folders, wrote the header lines and ids, and raised `FileExistsError` when run again. A file with an indented comment and a blank line read back through `read_instances_file` as just its ids.
+
+The real draw was repeated with seed 1234 to a scratch path and gave the same 25 ids as `instances/dev_25_seed1234.txt`. That file reads back as 25 ids, without `sympy__sympy-15599`, and passes `validate_instance_ids`. With the token in `.env`, the Hub authenticated the request and printed no warning.

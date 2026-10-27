@@ -36,7 +36,7 @@ def read_instances_file(path: Path) -> list[str]:
     Read instance ids from a text file, one id per line.
 
     Args:
-        path: A UTF-8 text file. Blank lines are skipped.
+        path: A UTF-8 text file. Blank and comment lines are skipped.
 
     Returns:
         The ids in file order, with surrounding whitespace removed.
@@ -50,7 +50,7 @@ def read_instances_file(path: Path) -> list[str]:
 
         for line in f:
             line = line.strip()
-            if line:
+            if line and not line.startswith("#"):
                 instance_ids.append(line)
 
     return instance_ids

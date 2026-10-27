@@ -1,0 +1,31 @@
+# seed=1234
+# dataset=SWE-bench/SWE-bench_Verified
+# split=test
+# n=25
+# excluded=['sympy__sympy-15599']
+# created=2026-10-27T05:53:39.741953+00:00
+astropy__astropy-13398
+astropy__astropy-14182
+astropy__astropy-14995
+astropy__astropy-7336
+django__django-11265
+django__django-11333
+django__django-11477
+django__django-11749
+django__django-13569
+django__django-15103
+django__django-15161
+django__django-16333
+pydata__xarray-2905
+pydata__xarray-7393
+pytest-dev__pytest-10081
+pytest-dev__pytest-7432
+scikit-learn__scikit-learn-12585
+sphinx-doc__sphinx-7590
+sphinx-doc__sphinx-8035
+sphinx-doc__sphinx-8459
+sphinx-doc__sphinx-9230
+sympy__sympy-18763
+sympy__sympy-21596
+sympy__sympy-21847
+sympy__sympy-24213
