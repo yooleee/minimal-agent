@@ -129,13 +129,48 @@ def build_messages(instance: dict, config: dict) -> list[dict]:
     return [{"role": "system", "content": system}, {"role": "user", "content": task}]
 
 
-def capture_patch(env: Environment, base_commit: str) -> str | None:
+def read_start_commit(env: Environment) -> str | None:
+    """
+    Read the commit the repo is at when the container starts, before the agent runs.
+
+    Args:
+        env: A started environment whose working directory is the repo (/testbed).
+
+    Returns:
+        The full commit hash (40 hex characters), or None if it could not be read
+        (nonzero exit or timeout).
+
+    Why:
+        The patch must hold only what the agent changed. Some SWE-bench images add a
+        NON-empty "SWE-bench" commit on top of the dataset's base_commit (found in the
+        8d batch: astropy-14182 marks all 1,862 files executable and edits
+        pyproject.toml), so diffing against base_commit also captured the image's own
+        changes. Diffing against HEAD at capture time would miss changes the agent
+        committed itself. The commit at container start is the one reference that
+        excludes the image's changes and still includes the agent's commits.
+    """
+
+    try:
+        rev_parse = env.execute("git rev-parse HEAD")
+
+        if rev_parse["returncode"] != 0:
+            print(f"{rev_parse["output"]} Nonzero exit occurred due to {rev_parse["returncode"]}")
+            return None
+
+        return rev_parse["output"].strip()
+
+    except subprocess.TimeoutExpired as e:
+        print(f"Start Commit read failed due to timeout error from {e}")
+        return None
+
+
+def capture_patch(env: Environment, start_commit: str | None) -> str | None:
     """
     Collect every change the agent made in the repo as one unified diff.
 
     Args:
         env: A started environment whose working directory is the repo (/testbed).
-        base_commit: The instance's "base_commit" from the dataset row.
+        start_commit: The container's "start_commit" from read_start_commit.
 
     Returns:
         The diff text, exactly as git printed it ("" if the agent changed nothing),
@@ -144,9 +179,9 @@ def capture_patch(env: Environment, base_commit: str) -> str | None:
     Why:
         The harness takes the patch itself instead of trusting the model to print
         one, so a submission can't be lost to a formatting mistake. Diffing against
-        base_commit (not HEAD) still catches changes if the agent ran `git commit`.
-        Verified: the image's HEAD is an extra empty "SWE-bench" commit on top of
-        base_commit, so the two give the same diff until the agent commits.
+        start_commit (not HEAD) still catches changes if the agent ran `git commit`.
+        Does not diff against the base commit, because some of the images add
+        a non-empty commit that would otherwise end up in the patch.
     """
     # `git add -A` also picks up the agent's scratch files (reproduce.py, out.txt).
     #   Kept on purpose: mini-swe-agent does the same, and the harness only runs the
@@ -157,7 +192,11 @@ def capture_patch(env: Environment, base_commit: str) -> str | None:
 
     try:
 
-        write_patch = env.execute(f"git add -A && git diff --cached {base_commit} > {PATCH_PATH}")
+        if start_commit is None:
+            print("start_commit is empty")
+            return None
+
+        write_patch = env.execute(f"git add -A && git diff --cached {start_commit} > {PATCH_PATH}")
         if write_patch["returncode"] != 0:
             print(f"{write_patch["returncode"]} Patch Capture failed due to {write_patch['output']}")
             return None
@@ -187,7 +226,7 @@ def run_instance(instance_id: str, config: dict) -> dict:
         "model_patch": str | None, "model": model_name from config,
         "step_count": int (from Agent), "started_at": str (ISO 8601 UTC timestamp),
         "finished_at": str (ISO 8601 UTC timestamp), "duration_s": float (seconds),
-        "lm_calls": list[dict], "messages": list[dict],
+        "lm_calls": list[dict], "messages": list[dict], "start_commit": str | None
         "error": {"type", "message", "traceback"} | None
         }.
 
@@ -209,6 +248,7 @@ def run_instance(instance_id: str, config: dict) -> dict:
     # True once env.start() returns, so the except knows whether a container exists
     # to capture from. A local flag, because the Environment Protocol has no container_id.
     started = False
+    start_commit = None
 
     # Errors raised above this line (unknown id, bad config in Agent.__init__) are
     # left to propagate on purpose: the same mistake would hit every instance in a
@@ -221,8 +261,9 @@ def run_instance(instance_id: str, config: dict) -> dict:
 
         env.start()
         started = True
+        start_commit = read_start_commit(env)
         exit_status = agent.run()
-        model_patch = capture_patch(env, instance["base_commit"])
+        model_patch = capture_patch(env, start_commit)
 
     # Exception, not BaseException: Ctrl-C (KeyboardInterrupt) still stops the run.
     # Broad on purpose: one instance failing for any reason must not stop a batch.
@@ -233,7 +274,7 @@ def run_instance(instance_id: str, config: dict) -> dict:
         # The partial patch is kept in the trajectory for diagnosis only.
         # append_prediction writes null, so a crashed run is never scored.
         if started:
-            model_patch = capture_patch(env, instance["base_commit"])
+            model_patch = capture_patch(env, start_commit)
 
     finally:
         env.cleanup()
@@ -246,7 +287,8 @@ def run_instance(instance_id: str, config: dict) -> dict:
         "model_patch": model_patch, "model": config["model"]["name"],
         "step_count": agent.step_count, "started_at": started_at,
         "finished_at": finished_at, "duration_s": round(duration_s, 4),
-        "lm_calls": agent.lm_calls, "messages": agent.messages
+        "lm_calls": agent.lm_calls, "messages": agent.messages,
+        "start_commit": start_commit
     }
 
 

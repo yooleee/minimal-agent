@@ -14,7 +14,7 @@ Goal of the project: one SWE-bench (bash-only) instance per evaluation, run unat
 | 6 | Run record (config, messages, result) saved to disk | Done |
 | 6b | Per-call LM record, early-exit guard, prompt fixes | Done |
 | 7 | Scoring with the SWE-bench harness | Done |
-| 8 | Robustness and batch runs | In progress (8a to 8c done, 8d dev set drawn) |
+| 8 | Robustness and batch runs | In progress (8a to 8c done, 8d first batch run and capture fixed) |
 
 ---
 
@@ -223,7 +223,7 @@ An empty config file raises `TypeError` naming the path.
 
 - **The harness captures the patch itself.** It does not rely on the model printing a diff, so a formatting slip cannot lose a submission.
 - **`capture_patch` builds a command string, not an argv list.** It is a caller of `env.execute()`, like the Agent. The argv list is built one layer down in `_docker_exec_argv`, where the string becomes the single argument after `bash -c`. The command also needs shell syntax (`&&`, `>`), which only works through bash.
-- **`git add -A`, then `git diff --cached <base_commit>`.** Plain `git diff` skips files the agent created. Diffing against `base_commit` instead of HEAD still catches changes if the agent runs `git commit`. Checked in the image: HEAD is an extra empty "SWE-bench" commit on top of `base_commit`, and the tree starts clean.
+- **`git add -A`, then `git diff --cached <base_commit>`.** Plain `git diff` skips files the agent created. Diffing against `base_commit` instead of HEAD still catches changes if the agent runs `git commit`. Checked in the image: HEAD is an extra empty "SWE-bench" commit on top of `base_commit`, and the tree starts clean. **Superseded:** this was checked on one image only. Some images add a non-empty commit, so the diff is now taken against the commit at container start (see "Step 8d fix").
 - **Two calls: write the diff to `/tmp/model.patch`, then `cat` it.** `execute()` merges stderr into the output, and git writes warnings to stderr (seen in the image: `warning: LF will be replaced by CRLF ...`). Redirecting only stdout to a file keeps those warnings out of the patch. The file sits outside `/testbed` so it never appears in its own diff.
 - **The output is returned without `.strip()`.** A patch must end with a newline, or `git apply` reports it as corrupt.
 - **Three distinct outcomes.** A diff string, `""` (captured, no changes), and `None` (capture failed). A nonzero exit or a timeout prints a warning starting with "Patch capture failed" that includes git's own message, and returns `None`. The run's `exit_status` is kept either way.
@@ -677,3 +677,60 @@ Verified has 500 instances across 12 repos (django 231, sympy 75, sphinx 44, mat
 `write_ids_file` created two missing folders, wrote the header lines and ids, and raised `FileExistsError` when run again. A file with an indented comment and a blank line read back through `read_instances_file` as just its ids.
 
 The real draw was repeated with seed 1234 to a scratch path and gave the same 25 ids as `instances/dev_25_seed1234.txt`. That file reads back as 25 ids, without `sympy__sympy-15599`, and passes `validate_instance_ids`. With the token in `.env`, the Hub authenticated the request and printed no warning.
+
+## Step 8d fix: Capturing the patch against the start commit
+
+**Goal.** Make `model_patch` hold only what the agent changed. The first 25-instance batch (`runs/2026-10-27T06-04-48`) showed that some patches also held changes made by the image itself.
+
+### The finding
+
+Five of the 25 patches were 60k to 234k characters: astropy-14182, astropy-14995, pytest-7432, sympy-21847 and sympy-24213. Almost all of each was mode-only changes (`old mode 100644`, `new mode 100755`), 539 to 1,929 files per patch, and none of the agent's commands changed file modes.
+
+The cause is in the images. Each has an extra "SWE-bench" commit on top of the dataset's `base_commit`. Step 5 checked one image (sympy-15599), where that commit is empty, and concluded that diffing against `base_commit` was safe. For astropy-14182 the commit is not empty:
+
+```
+4331a8dde SWE-bench          HEAD
+a5917978b Merge pull ...     base_commit
+HEAD vs base_commit: 1862 mode changes, 1862 files changed, 1 insertion(+), 1 deletion(-)
+```
+
+A fresh container from that image shows no changes against HEAD, so the agent did not cause them. Diffing against `base_commit` put the image's own commit into the patch.
+
+**Effect on the first batch: none of the outcomes changed.** In the two astropy instances, `git apply` failed on the image's `pyproject.toml` edit, which is already present in the evaluation container. The harness then fell back to `patch --fuzz` and applied the agent's change cleanly (`patch_successfully_applied: true`). The other three applied with type warnings only. Four of the five resolved. astropy-14182 failed for a real reason: the agent fixed writing tables with `header_rows` but not reading them back. Those scores relied on the harness's fallback working around patches it could not apply, so the fix was still needed.
+
+### Design decisions
+
+- **`read_start_commit(env)` runs `git rev-parse HEAD` after `env.start()` and before `agent.run()`.** The commit at container start leaves out the image's changes and still includes anything the agent commits itself. Diffing against `HEAD` at capture time would miss the agent's commits, which is why Step 5 avoided it.
+- **The hash is stripped and the patch is not.** The trailing newline after a hash would end up inside the next git command. A patch needs its trailing newline (Step 5).
+- **An unknown start commit is a failed capture.** `read_start_commit` returns `None` on a nonzero exit or a timeout, and `capture_patch` returns `None` for a `None` start commit without running git. Falling back to `base_commit` would quietly bring the bug back.
+- **`start_commit` is recorded in every trajectory**, so it is always visible what a patch was diffed against, and a `None` explains a failed capture.
+- **Both capture calls use it**, including the partial capture after a crash. A crashed run's patch is never scored, but its trajectory should not show the image's changes as the agent's.
+
+### Bugs found in review
+
+- **`read_start_commit`:**
+  - The timeout branch printed a warning but had no `return None`, so it would have read a variable that was never set.
+  - The nonzero-exit warning left out git's message, and a stray `f` inside an f-string printed the exit code as `f128`.
+- **`run_instance`:** only the normal capture call was switched to `start_commit` at first. A stub crash on the astropy-14182 image then captured 1,862 files.
+- **Docstring:** `capture_patch` kept "Verified:" in front of a statement that was now a design choice, and named its parameter `base_commit` after the rename.
+
+### Verification
+
+A reproduction script builds a temporary repo shaped like the astropy image (a base commit, then a "SWE-bench" commit that makes the files executable and edits `pyproject.toml`). It runs on `LocalEnvironment` and calls `read_start_commit` and `capture_patch`. On the old code all three cases failed. Case 3 also showed that a run with no agent changes would have had a non-empty patch and never scored as `empty_patch`.
+
+| Case | Before | After |
+|---|---|---|
+| The agent edits one file | the image's mode changes and `pyproject.toml` in the patch | only the agent's file |
+| The agent edits and commits | the image's changes included | the commit captured, nothing else |
+| The agent changes nothing | a non-empty patch | `""` |
+
+Against Docker, with `Agent.run` replaced by a stub:
+
+| Run | Result |
+|---|---|
+| astropy-14182, edit then submit | `start_commit` is the image's SWE-bench commit, and the patch holds only `rst.py`, with 0 `old mode` lines |
+| astropy-14182, edit then crash | the same |
+| sympy-15599, full `main()` | `Submitted`, a one-file patch, `start_commit` recorded |
+| `env.start()` raises | `Error`, `start_commit: None`, no capture attempted |
+
+`read_start_commit` outside a git repo returns `None` with git's message, and `capture_patch(env, None)` returns `None` without running git. No container was left behind.
