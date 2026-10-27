@@ -14,7 +14,7 @@ Goal of the project: one SWE-bench (bash-only) instance per evaluation, run unat
 | 6 | Run record (config, messages, result) saved to disk | Done |
 | 6b | Per-call LM record, early-exit guard, prompt fixes | Done |
 | 7 | Scoring with the SWE-bench harness | Done |
-| 8 | Robustness and batch runs | In progress (8a to 8c done, 8d first batch run and capture fixed) |
+| 8 | Robustness and batch runs, baseline and exit-rule experiment | Done |
 
 ---
 
@@ -627,7 +627,7 @@ The last case also had its `report.json` removed, so it shows the label on a lin
 
 ## Step 8d: Baseline batch on a dev set
 
-**Goal.** Measure the current harness on more than one instance, as the baseline that the Step 8e exit-rule variant is compared against. This section records the dev set and the decisions behind it. The batch results are added when the run is done.
+**Goal.** Measure the current harness on more than one instance, as the baseline that the Step 8e exit-rule variant is compared against. This section records the dev set and the decisions behind it. The results are in "Step 8d results", after the capture fix that the first batch led to.
 
 ### The dev set
 
@@ -734,3 +734,85 @@ Against Docker, with `Agent.run` replaced by a stub:
 | `env.start()` raises | `Error`, `start_commit: None`, no capture attempted |
 
 `read_start_commit` outside a git repo returns `None` with git's message, and `capture_patch(env, None)` returns `None` without running git. No container was left behind.
+
+## Step 8d results: The baseline
+
+**Goal.** Measure how often the current harness resolves the dev set, and how much that number moves between identical runs.
+
+### Runs
+
+All runs used gpt-5.6-luna and `config/default.yaml` on `instances/dev_25_seed1234.txt`. All 100 instance runs ended `Submitted`, with no `agent_error`, `capture_failed`, `error`, infra or ambiguous labels, and no command timeouts.
+
+| Run | Notes | Resolved | Cost |
+|---|---|---|---|
+| `2026-10-27T06-04-48` | first batch, before the capture fix (outcomes checked unaffected) | 14 | $0.24 |
+| `2026-10-27T09-09-31` | capture fix, run alone | 16 | $0.21 |
+| `2026-10-27T18-03-42` | run in parallel with the Step 8e variant | 18 | $0.26 |
+| `2026-10-27T18-43-12` | run in parallel with the Step 8e variant | 16 | $0.22 |
+
+**The baseline is 64 of 100 instance runs resolved (64%).** Identical runs ranged from 14 to 18, so a single 25-instance run moves by about ±2 instances by chance. Between the first two runs, 4 of the 25 instances flipped (3 to resolved, 1 to unresolved). A difference of 1 to 3 instances between two single runs is therefore not evidence of anything. Running in parallel did not cause command timeouts in either arm.
+
+Per instance, across the 4 runs:
+- 13 instances resolved every time.
+- 6 failed every time: astropy-13398, astropy-14182, django-11265, django-11477, sphinx-7590 and sympy-21596. These also failed in both Step 8e runs.
+- The rest were unstable: django-11333, django-13569, sphinx-9230 and sympy-18763 resolved 2 of 4, django-15103 3 of 4, and xarray-2905 1 of 4.
+
+### Why the unresolved runs failed
+
+The 11 unresolved instances of the first batch were read from their trajectories, scores and the dataset's hidden test patches.
+
+- **10 of the 11 fail a hidden FAIL_TO_PASS test.** The test is new in the hidden test patch, or the patch changes an existing test, so the agent could not have run the failing version whatever the prompt says. These are mostly incomplete fixes. astropy-14182, for example, fixed writing tables with `header_rows` but not reading them back.
+- **3 broke an existing PASS_TO_PASS test (a regression):** astropy-13398, django-13569 and sphinx-9230. An earlier count of 4 was wrong. sympy-18763 is P2P 141/141. Running existing tests could have caught these three. astropy-13398 ran the right tests, saw `1 failed`, and exited anyway.
+- **Running tests did not separate resolved from unresolved runs.** In the first batch, 7 of the 14 resolved runs used only scratch checks. The Step 7 pattern on sympy-15599 (every resolved run had run the tests, no unresolved run had) did not hold across 25 instances.
+- **Finding the runner is a practical gap.** The sympy images have no `pytest`, so `python -m pytest` fails with `No module named pytest`. Sympy's runner is `bin/test` and Django's is `tests/runtests.py`. SWE-bench's `eval_script` must not be given to the agent, because it contains the hidden tests.
+
+The test-runner counts come from a text search of the agent's commands, which cannot always tell a repository test run from pytest on a scratch file.
+
+### The Step 6b narration problem continues
+
+The prompt changes of Step 6b did not stop the model from writing out a whole session in its first reply. The `PrematureExit` guard rejected an early `exit` in 3 to 7 of the 25 runs of every batch. Replies with several bash blocks are still common and are rejected by the format check. Step 8e (below) shows the cost: a run whose edits were all in rejected replies can still pass every check and submit nothing. The guard only applies while no command has run. Fixing this is open.
+
+## Step 8e: Exit-rule variant
+
+**Goal.** Test the Step 7 idea that pointing the exit rule at the repository's own tests improves the result.
+
+### The variant
+
+`config/exit_tests.yaml` is `default.yaml` with two prompt lines changed. The rest is identical, which was checked by loading both files.
+
+- **Exit rule:** exit only after (1) seeing output that verifies the fix and (2) running the repository's existing tests for the code that was changed and seeing them pass. Failures caused by the change must be fixed first.
+- **Workflow line:** after verifying, find and run the existing tests, and if `pytest` is not installed, look for the project's own runner (for example a `runtests.py` or `bin/test` script). The hint is generic, and nothing from the evaluation script is included.
+- **Not included:** advice to `git stash` a change to check whether a failure already existed, because forgetting `stash pop` would leave an empty patch.
+
+The two changes are treated as one intervention, because the exit rule is useless when the agent cannot find the runner.
+
+### Design
+
+- **Paired runs.** Each variant run was started alongside a baseline run, a few seconds apart (folder names are per second), so both arms shared the same CPU load. This was done twice. No command timed out in any run.
+- **The size of effect it can detect.** Two variant runs against four baseline runs can show a large effect or harm, but not a gain of 1 to 3 instances, which is the size of the run-to-run noise. That limit was accepted before running.
+
+### Results
+
+| Arm | Resolved per run | Total | Runs breaking a PASS_TO_PASS test | Cost per run |
+|---|---|---|---|---|
+| Baseline | 14, 16, 18, 16 | 64/100 (64%) | 7/100 | about $0.24 |
+| Variant (`2026-10-27T18-03-48`, `18-43-18`) | 16, 16 | 32/50 (64%) | 2/50 | about $0.31 |
+
+- **The resolved rate did not change.** Four instances differed between the arms, two in each direction, which is what noise looks like at this size.
+- **The behaviour changed.** The variant ran a test runner in 24 and 25 of 25 runs, against 14 to 20 in the baseline, and most variant runs finished with a test run. It took about 20% longer and cost about 25% more. It still tried `pytest` first in the sympy images.
+- **Regressions went down, from 7% of runs to 4%.** Both remaining ones were astropy-13398, which broke tests in every run of both arms. The variant removed the regressions in django-13569 and sphinx-9230, but neither became reliably resolved, because both also fail their hidden FAIL_TO_PASS test in some runs.
+- **None of the 6 always-failing instances was rescued.**
+
+### Conclusion
+
+**The exit rule only helps where the hidden FAIL_TO_PASS tests already pass.** It reduces regressions, but a regression only costs the score when the fix is otherwise correct, as in the django-13569 runs whose only failure was a regression. In this dev set that is rare, so the rule costs about 25% more and has no measurable effect on the score. It stays out of `default.yaml`, and `exit_tests.yaml` is kept. It becomes worth revisiting once incomplete fixes are less common, because then more failures would be regression-only.
+
+### A new failure mode
+
+In the first variant run, django-11333 submitted an empty patch. Its edits were in two replies with 12 and 4 bash blocks, which the format check rejected, so no edit ever ran. It then ran `tests/runtests.py urlpatterns_reverse`, which passed on the unchanged code, ran a verification script, and exited. The new rule was met by an unchanged repository, and the `PrematureExit` guard did not apply because commands had run. This is the Step 6b narration problem.
+
+### Open items
+
+- **The narration problem (Steps 6b and 8d).** The first reply still narrates a session, and replies with many blocks are still common. Both waste steps, and they can end in an empty submission.
+- **Incomplete fixes** are the main cause of failure: 6 instances failed in all 6 runs, all on hidden tests.
+- **Larger runs.** A larger dev-set baseline (100 to 150 instances, about 400 to 600 GB of images) would narrow the 95% interval from about ±20 to about ±8 to 10 points. The full 500 instances would need about 2 TB of images, so it first needs each image removed after its run (deferred in Step 8b).
