@@ -864,3 +864,51 @@ All checks ran first on scratch paths, with seed 7 and with an id given both on 
 - Drawing again with seed 1001 to a scratch path gave identical ids in both files.
 - A typo in `--exclude` raises `ValueError` naming it.
 - Both files read back through `read_instances_file` and pass `validate_instance_ids`.
+
+## Step 9b: Environment order, scoring each instance, removing its image
+
+**Goal.** Keep Docker disk bounded during the 500-instance run. The images share layers by repo and version (26 local images take 44 GB, not 26 × 4), but all 500 would still not fit comfortably. So each instance is scored right after it runs, while its image is still there, and its image is removed once the next instance has started.
+
+### What was added
+
+- **`sample_instances.py --order-by-env`** writes the sample sorted by (repo, version, instance_id) through the new `order_by_environment`, and every ids file now records `order=repo,version` or `order=alphabetical` in its header. Without the flag the output is unchanged, so the 8d and 9a files can still be redrawn exactly.
+- **`config/environments.remove_image`** runs `docker rmi` with a 120 s timeout and returns `True` or `False`. It never raises: a failed removal costs disk, not correctness.
+- **`run_batch.score_new_predictions`** calls `run_harness` on the run folder and returns `False` on a `RuntimeError`, so a scoring failure warns instead of stopping the batch. `score_run.py` at the end scores anything still missing.
+- **`run_batch.py --score-each --remove-images`.** After each instance the batch scores it, then removes the previous instance's image. The last image is removed after the loop. The final line prints the number of scoring and removal failures.
+
+### Design decisions
+
+- **Order by environment.** Shared layers survive only between neighbouring instances, so instances of the same repo and version run next to each other. Over all 500 ids this gives 79 environment switches instead of 101 alphabetically. Versions are compared as strings ("1.12" before "1.9"), which is fine because only the grouping matters.
+- **Remove the previous image, not the current one.** The current image stays on disk until the next instance has pulled its own, so a shared environment is reused instead of pulled again. At most two of the batch's images are on disk at once.
+- **Two flags, not one.** `--score-each` alone suits a dev-set batch that scores as it goes and keeps its images. `--remove-images` without `--score-each` is refused with `parser.error`, because `score_run.py` would then have to pull every image again.
+- **No `docker rmi -f`.** Forcing would untag an image that a leftover container still uses. Leaving it on disk and warning is safer.
+- **Only `RuntimeError` is caught when scoring.** `run_harness` raises it for a nonzero harness exit or a missing summary. `FileNotFoundError` or `ValueError` would mean `preds.jsonl` is missing or empty, which `run_and_save` rules out, so those still surface as bugs.
+- **Incremental scoring relies on the harness skipping finished ids.** `run_harness` passes every id in `preds.jsonl`, and swebench 5.0.2 skips each id that already has a `report.json` for the run id. The harness also keeps any image that existed before it ran, so `remove_image` is the only thing that removes images.
+
+### Bugs found in review
+
+- **`order_by_environment`:**
+  - `missing_ids != 0` compared a list with an int, which is always unequal, so the function raised on every call.
+  - `key=` was given a list of (id, environment) pairs instead of a function.
+- **`main()` in `sample_instances.py`:**
+  - `rows["id"]` for the column `instance_id`.
+  - The result of `order_by_environment` was discarded, so `--order-by-env` files came out alphabetical.
+  - The header first recorded `order=True`, the flag's value, instead of `order=repo,version`.
+- **The `run_batch.py` loop:**
+  - `args.remove_image` for `args.remove_images`.
+  - Each instance's own image was removed right after it, so a neighbour never reused shared layers.
+  - Both failure counters were incremented on every call instead of only on a `False` return.
+- **`remove_image`:** after renaming the `subprocess.run` result to `result`, the nonzero-exit warning still read `output.stderr`. A failed `docker rmi` raised `NameError`, which `run_batch` does not catch.
+
+### Verification
+
+- **`order_by_environment`** on the real 500 rows: the same 500 ids, 79 environment switches against 101 alphabetically, and the same output for reversed input. A two-id toy case with missing ids raises one `ValueError` naming both.
+- **`--order-by-env`** on a 100-id scratch sample: the same ids as without the flag, in (repo, version, id) order, with the matching `order=` header. A 12-id sample could not tell the two orders apart, because alphabetical was already environment order there.
+- **`remove_image`** against Docker, with an extra tag on a local image: `True` when the tag was removed, `False` with Docker's message for a missing image, `False` when `docker` is not on `PATH`, and `False` for a mocked timeout. The source image was untouched.
+- **Incremental scoring** on a copy of run `2026-10-27T18-43-12` with one `report.json` deleted: only that instance was evaluated (26 s), its new report matched the original, and the other 24 reports kept their timestamps.
+- **`run_batch.main()` with every call stubbed:** the calls ran in the order score, score, remove 1, score, remove 2, remove 3, and the failure counts were 0 and 0, 3 and 3, or 1 and 1 when the stubs returned `True`, `False` or a mix. `--remove-images` alone exits with code 2 before creating a run folder.
+- **End to end against Docker** with `Agent.run` stubbed (no API calls) on three pool ids whose images were not on disk, django-13033 and -13109 (version 3.2) and -14915 (4.1):
+  - All three were scored, with 0 scoring and 0 removal failures, and no images were left afterwards.
+  - Polling `docker images` every 2 s, at most two of the three were on disk at once.
+  - `score_run.py` then exited 0 and wrote `scores.json` with no images present (3 unresolved, as expected for the stub patch).
+  - Instances took 19 s, 5 s and 13 s including pulls. 13109 reused the 3.2 environment pulled for 13033. These times are optimistic, because other django images were already on disk. Pull times for a repo with nothing cached are measured in the 9e pilot.

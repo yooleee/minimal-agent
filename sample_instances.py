@@ -142,6 +142,48 @@ def print_repo_counts(ids: list[str], path: Path) -> None:
     print(f"Per Repo: {run_count_string}", f"Path: {path}")
 
 
+def order_by_environment(ids: list[str], environments: dict[str, tuple[str, str]]) -> list[str]:
+    """
+    Sort ids so instances that share a Docker environment run next to each other.
+
+    Args:
+        ids: The ids to order (for Stage 9, all 500 Verified ids).
+        environments: {instance_id: (repo, version)} for every id in ids, built
+            from the dataset rows in main().
+
+    Returns:
+        The same ids, sorted by (repo, version, instance_id).
+
+    Raises:
+        ValueError: if an id has no entry in environments.
+
+    Why:
+        Images of the same repo and version share their environment layers
+        (sympy and django images add only about 0.2 GB of their own). 9b keeps
+        the previous image until the next one is pulled, so shared layers
+        survive only between neighbours. In this order the 500 ids switch
+        environment 79 times, against 101 in alphabetical order. Pure function,
+        like sample_ids, so it can be tested without the dataset.
+    """
+
+    missing_ids = []
+    for missing_id in ids:
+
+        if missing_id not in environments:
+            missing_ids.append(missing_id)
+
+    if missing_ids != []:
+        raise ValueError(f"Missing ids {missing_ids} have no entry in env.")
+
+    def order_by_env(instance_id: str) -> tuple[str, str, str]:
+    #   Converts the id and env into a tuple consisting of the repo, version and id.
+
+        repo, version = environments[instance_id]
+        return (repo, version, instance_id)
+
+    return sorted(ids, key=order_by_env)
+
+
 def write_ids_file(path: Path, ids: list[str], header_lines: list[str]) -> None:
     """
     Write the ids, one per line, under a block of # comment lines.
@@ -197,6 +239,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--complement-output", type=Path, default=None, required=False)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+    parser.add_argument("--order-by-env", action="store_true", required=False)
 
     args = parser.parse_args()
     config = load_config(args.config)
@@ -221,8 +264,20 @@ def main() -> None:
         f"dataset={config["dataset"]["name"]}",
         f"split={config["dataset"]["split"]}",
         f"n={args.n}", f"created={created}", f"excluded={merged}",
-        f"exclude_files={[str(path) for path in args.exclude_file]}"
+        f"exclude_files={[str(path) for path in args.exclude_file]}",
     ]
+
+    if args.order_by_env:
+        environments = {}
+
+        for row in dataset:
+            environments[row["instance_id"]] = (row["repo"], row["version"])
+
+        ids = order_by_environment(ids, environments)
+        header_lines.append("order=repo,version")
+
+    else:
+        header_lines.append("order=alphabetical")
 
     write_ids_file(args.output, ids, header_lines)
 

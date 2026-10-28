@@ -44,6 +44,40 @@ def swebench_image_name(instance_id: str) -> str:
     return image_reference.lower()
 
 
+def remove_image(image: str) -> bool:
+    """
+    Remove one Docker image from the local cache. Never raises.
+
+    Args:
+        image: Image reference, e.g. from swebench_image_name().
+
+    Returns:
+        True if Docker removed it, False otherwise (a warning is printed).
+
+    Why:
+        A full 500-instance run cannot keep every image (Step 9 plan). Lives
+        here because this module owns every docker call. Never raises, like
+        cleanup(): a failed removal costs disk, not correctness, and must not
+        stop a batch. Returns a bool so run_batch can count failures for the
+        end-of-run summary.
+    """
+
+    try:
+        result = subprocess.run(
+            ["docker", "rmi", image], capture_output=True,
+            text=True, timeout=120, check = False
+        )
+
+    except (subprocess.TimeoutExpired, OSError) as e:
+        print(f"Timeout or OSError occurred from {image} due to {e} resulting in image left on disk")
+        return False
+
+    if result.returncode != 0:
+        print(f"Docker image removal {image} failed at exit {result.returncode} resulting in image left on disk: {result.stderr.strip()}")
+        return False
+
+    return True
+
 class Environment(Protocol):
     """
     Structural interface every environment satisfies (no inheritance needed).

@@ -22,7 +22,9 @@ from pathlib import Path
 
 from datasets import load_dataset
 
+from config.environments import remove_image, swebench_image_name
 from handling.records import make_run_dir, save_run_metadata
+from handling.scoring import run_harness
 from run_single import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_OUTPUT_DIR,
@@ -102,6 +104,36 @@ def validate_instance_ids(instance_ids: list[str], dataset_name: str, split: str
         raise ValueError(f"Unknown ids not found in set: {unknown_ids} from dataset {dataset_name} with split {split}")
 
 
+def score_new_predictions(run_dir: Path, config: dict) -> bool:
+    """
+    Score the predictions in run_dir that have no harness report yet.
+
+    Args:
+        run_dir: The batch's run folder.
+        config: The loaded config (for the dataset name and split).
+
+    Returns:
+        True if the harness ran, False if it failed (a warning is printed).
+
+    Why:
+        The image must still be present when an instance is scored, or the
+        harness pulls it again. run_harness passes every id in preds.jsonl, but
+        swebench 5.0.2 skips ids that already have a report.json for this run id
+        (run_evaluation.get_dataset_from_preds), so only the new one is
+        evaluated. A failure here must not stop a multi-day batch: score_run.py
+        at the end evaluates any id that still has no report.
+    """
+
+    try:
+        run_harness(run_dir, config["dataset"]["name"], config["dataset"]["split"])
+
+    except RuntimeError as e:
+        print(f"Scoring failed at {run_dir} due to {e}, retry will occur at the end.")
+        return False
+
+    return True
+
+
 def main() -> None:
     """
     Parse the command line, validate the ids, then run each instance in turn.
@@ -120,8 +152,13 @@ def main() -> None:
     parser.add_argument("--instances-file", type=Path, help = "Pass the instances file for the batch run")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="Pass the yaml config path for the agent such as: default.yaml")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Provide the directory path where run outputs will be placed")
+    parser.add_argument("--score-each", action="store_true")
+    parser.add_argument("--remove-images", action="store_true")
 
     args = parser.parse_args()
+
+    if args.remove_images and not args.score_each:
+        parser.error("score-each must be given if remove-images is given.")
 
     if bool(args.instance_ids) == bool(args.instances_file):
         parser.error("Give either the instance ids or the instances_file.")
@@ -139,11 +176,29 @@ def main() -> None:
     save_run_metadata(run_dir, config, instance_ids)
     run_tally = Counter()
 
+    last_image = None
+    scoring_failure = 0
+    removal_failure = 0
+
     for index, instance_id in enumerate(instance_ids, start = 1):
         print(f"Progress check: [{index}/{len(instance_ids)}] {instance_id}")
+
         record = run_and_save(run_dir, instance_id, config)
         run_tally[record["exit_status"]] += 1
+        image = swebench_image_name(instance_id)
 
+        if args.score_each and not score_new_predictions(run_dir, config):
+            scoring_failure += 1
+
+        if args.remove_images and last_image is not None:
+            if not remove_image(last_image):
+                removal_failure += 1
+
+        last_image = image
+
+    if args.remove_images and last_image is not None:
+        if not remove_image(last_image):
+            removal_failure += 1
 
     status_list = []
     for status, count in run_tally.items():
@@ -151,7 +206,7 @@ def main() -> None:
 
     status_string = ", ".join(status_list)
 
-    print(f"Tally: {status_string}, Run Directory: {run_dir}, Next: python score_run.py {run_dir}")
+    print(f"Tally: {status_string}, Scoring failures: {scoring_failure},  Removal failures: {removal_failure}, Run Directory: {run_dir}, Next: python score_run.py {run_dir}")
 
 
 if __name__ == "__main__":
