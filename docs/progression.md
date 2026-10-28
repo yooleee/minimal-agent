@@ -15,6 +15,7 @@ Goal of the project: one SWE-bench (bash-only) instance per evaluation, run unat
 | 6b | Per-call LM record, early-exit guard, prompt fixes | Done |
 | 7 | Scoring with the SWE-bench harness | Done |
 | 8 | Robustness and batch runs, baseline and exit-rule experiment | Done |
+| 9 | Full 500-instance baseline, with a held-out split drawn first | In progress |
 
 ---
 
@@ -816,3 +817,50 @@ In the first variant run, django-11333 submitted an empty patch. Its edits were 
 - **The narration problem (Steps 6b and 8d).** The first reply still narrates a session, and replies with many blocks are still common. Both waste steps, and they can end in an empty submission.
 - **Incomplete fixes** are the main cause of failure: 6 instances failed in all 6 runs, all on hidden tests.
 - **Larger runs.** A larger dev-set baseline (100 to 150 instances, about 400 to 600 GB of images) would narrow the 95% interval from about ±20 to about ±8 to 10 points. The full 500 instances would need about 2 TB of images, so it first needs each image removed after its run (deferred in Step 8b).
+
+## Step 9a: The held-out split
+
+**Goal.** Fix which instances nobody tunes on, before the full baseline run produces any trajectory to read. Stage 9 runs the baseline once on all 500 Verified instances. Later stages add a narration-fix arm (Stage 10) and a GEPA arm (Stage 11), and Stage 12 compares all three on instances that played no part in designing or tuning them. Stage 9 is split into 9a (this step), 9b (ordering the ids, scoring each instance and removing its image), 9c (`--resume`), 9d (stopping on repeated errors), 9e (pilot), 9f (full run) and 9g (results).
+
+### The split
+
+| File | Ids | Use |
+|---|---|---|
+| `instances/heldout_360_seed1001.txt` | 360 | The comparison set. Not read or tuned on until Stage 12. |
+| `instances/pool_140_seed1001.txt` | 140 | Everything else, for arm design and GEPA's train and val sets. |
+
+The 26 instances already used for tuning (`dev_25_seed1234.txt` and `sympy__sympy-15599`) were excluded from the draw, so all 26 are in the pool. The held-out set is 45% django (161 of 360), close to Verified's 46%. The pool is 50% django (70 of 140).
+
+### Design decisions
+
+- **Drawn before the baseline run.** The full run is an untuned baseline, so running it on all 500 is fine. Reading its trajectories is where tuning starts, so the boundary has to exist first. Failure-mode reading in Stage 9 is limited to pool instances.
+- **360 held-out, 140 pool.** The held-out set is large enough that a paired comparison of two arms can detect a difference of about 6 points with one run per arm. That figure comes from about 16% of instances flipping between identical runs in Step 8d. The pool covers a GEPA train set of about 100 and a val set of about 40.
+- **The name is `heldout`, not `test`.** The dataset split is already called `test`, and that word appears in every file's header.
+- **`sample_instances.py` gained two options.** `--exclude-file` reads ids files with `run_batch.read_instances_file`, so `#` lines are skipped as in batches. `--complement-output` writes every id not sampled. The pool is written as a file instead of being derived later, so the boundary is explicit and can be checked.
+- **`complement_ids` raises `ValueError` for an id in the sample that is not in the dataset**, the same check `sample_ids` makes for exclusions. It returns the ids sorted, so the file depends only on the two sets.
+- **The exclusions are merged with `dict.fromkeys`**, which keeps order and drops an id given both on the command line and in a file. `sample_ids` only checks membership, so a repeated id never changed the sample. The merge only keeps the header from listing an id twice.
+- **Each file has its own header.** The held-out header records `excluded=` (the merged list of 26) and `exclude_files=`. The pool header records `complement_of=` and no exclusions, because the pool contains those ids. Both share one `created=` time, so they visibly come from the same draw.
+- **`print_repo_counts`** holds the per-repo count line, which is now printed for both files.
+
+### Bugs found in review
+
+- **`complement_ids`:**
+  - The first version checked membership against an empty local list instead of `taken`, so it returned every id. The pool would have held all 500, including the held-out ones.
+  - Its error message printed that empty list, and it raised on the first unknown id instead of listing all of them.
+- **`main()`:**
+  - `args.exclude_files` and `args.excluded` for the attributes argparse names `exclude_file` and `exclude`.
+  - `sample_ids(..., args.exclude) + merged` excluded only the command-line id and then appended all 26 tuned ids to the sample. A scratch run gave 386 lines, 21 of them duplicates, with every tuned instance in the held-out set.
+  - The pool was first written to the held-out path, which mode `"x"` refuses.
+  - `created=` was computed twice, so the two files had different times. The pool header lacked `seed=` and carried exclusion lines.
+  - The held-out header recorded `args.exclude` (1 id) instead of the merged 26, at one point in two lines next to the correct one, and printed the file paths as `PosixPath(...)`.
+
+### Verification
+
+All checks ran first on scratch paths, with seed 7 and with an id given both on the command line and in the file, then on the real files:
+
+- 360 held-out and 140 pool ids, with no duplicates and no overlap, 500 in total.
+- None of the 26 tuned ids in the held-out set, and all 26 in the pool.
+- The held-out `excluded=` line holds exactly those 26 ids. The pool header has `complement_of=`, the same seed and the same `created=`, and no exclusion lines.
+- Drawing again with seed 1001 to a scratch path gave identical ids in both files.
+- A typo in `--exclude` raises `ValueError` naming it.
+- Both files read back through `read_instances_file` and pass `validate_instance_ids`.
