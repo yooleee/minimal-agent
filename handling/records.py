@@ -10,7 +10,10 @@
 # Layout:          runs/<UTC timestamp>/
 #                      run.json                    written once, before any instance
 #                      <instance_id>.traj.json     one per instance
+#                      <instance_id>.attempt-<n>.json  an earlier errored or
+#                                                  interrupted attempt, kept by --resume
 #                      preds.jsonl                 one line appended per instance
+#                      resumes.jsonl               one line per --resume of the run
 #                      scores.json                 written by score_run.py
 #                      <model>.<run_id>.json       harness summary, written by the
 #                                                  SWE-bench harness (see scoring.py)
@@ -219,6 +222,69 @@ def append_prediction(run_dir: Path, record: dict) -> None:
     with path.open("a", encoding="utf-8") as f:
         f.write(line + "\n")
 
+
+def keep_previous_attempt(run_dir: Path, instance_id: str) -> Path | None:
+    """
+    Rename an instance's existing trajectory out of the way before it reruns.
+
+    Args:
+        run_dir: The run folder being resumed.
+        instance_id: The id about to run again.
+
+    Returns:
+        The new path, run_dir / "<instance_id>.attempt-<n>.json" with n the first
+        number not already taken (1, 2, ...), or None if there was no trajectory.
+
+    Why:
+        save_trajectory opens with mode "x", so a rerun would fail to save while
+        a trajectory exists, after the run was already paid for. The old file
+        is renamed, never deleted: an errored or interrupted attempt is evidence
+        (why did it crash?). The new name does not end in ".traj.json", so
+        anything that globs trajectories later sees exactly one per instance.
+    """
+
+    current_path = run_dir / f"{instance_id}.traj.json"
+
+    if not current_path.exists():
+        return None
+
+    n = 1
+
+    while True:
+        updated_path = run_dir / f"{instance_id}.attempt-{n}.json"
+
+        if not updated_path.exists():
+            current_path.rename(updated_path)
+            return updated_path
+        n += 1
+
+def append_resume(run_dir: Path) -> None:
+    """
+    Append one line to resumes.jsonl recording when and how the run was resumed.
+
+    Args:
+        run_dir: The run folder being resumed.
+
+    Returns:
+        None. Appends to run_dir / "resumes.jsonl".
+
+    Why:
+        run.json is write-once (mode "x") and describes how the run started.
+        A resume can happen days later on different harness code, so each one
+        is recorded separately. Same append-only JSONL pattern as preds.jsonl.
+    """
+
+    resume = {
+        "resumed_at": datetime.now(timezone.utc).isoformat(),
+        "harness": _harness_git_state(),
+        "argv": sys.argv,
+    }
+
+    line = json.dumps(resume, ensure_ascii=False)
+    path = run_dir / "resumes.jsonl"
+
+    with path.open("a", encoding="utf-8") as f:
+        f.write(line + "\n")
 
 def save_scores(run_dir: Path, scores: dict) -> Path:
     """

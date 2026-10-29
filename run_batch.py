@@ -12,19 +12,24 @@
 #                  running. Instances run sequentially: under amd64 emulation on
 #                  Apple Silicon, parallel containers mostly compete for CPU.
 #                  Revisit with an x86 host or batches of more than ~50.
-# Deferred:        --resume (skip ids already in preds.jsonl) and removing each
-#                  instance image after its run (each is several GB).
+#                  --resume <run_dir> continues a stopped run in its own folder.
 # =============================================================================
 
 import argparse
+import json
 from collections import Counter
 from pathlib import Path
 
 from datasets import load_dataset
 
-from config.environments import remove_image, swebench_image_name
-from handling.records import make_run_dir, save_run_metadata
-from handling.scoring import run_harness
+from config.environments import image_exists, remove_image, swebench_image_name
+from handling.records import (
+    append_resume,
+    keep_previous_attempt,
+    make_run_dir,
+    save_run_metadata,
+)
+from handling.scoring import read_predictions, run_harness
 from run_single import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_OUTPUT_DIR,
@@ -134,6 +139,85 @@ def score_new_predictions(run_dir: Path, config: dict) -> bool:
     return True
 
 
+def load_resume_ids(run_dir: Path, config: dict) -> list[str]:
+    """
+    Read the planned ids of a run being resumed, refusing a different config.
+
+    Args:
+        run_dir: The run folder to resume (holds run.json).
+        config: The config loaded from --config for this session.
+
+    Returns:
+        run.json's "instance_ids", in their original order.
+
+    Raises:
+        FileNotFoundError: if run_dir has no run.json (not a run folder).
+        ValueError: if config differs from run.json's "config". The message
+            names the top-level keys that differ.
+
+    Why:
+        One folder must never mix results from two configs: scores.json would
+        average them and nothing would show it. The ids come from run.json, not
+        the command line, so a resume cannot quietly run a different list.
+        Comparing the loaded dicts works because run.json stores the config as
+        JSON and YAML gives only JSON-compatible values here.
+    """
+
+    with (run_dir / "run.json").open(encoding="utf-8") as f:
+        run_json = json.load(f)
+
+    saved_config = run_json["config"]
+    if saved_config != config:
+        non_matching_keys = []
+
+        for key in sorted(saved_config.keys() | config.keys()):
+            if key not in config:
+                non_matching_keys.append(key)
+
+            elif key not in saved_config:
+                non_matching_keys.append(key)
+
+            elif saved_config[key] != config[key]:
+                non_matching_keys.append(key)
+
+        raise ValueError(f"Missing or Non-matching keys found: {non_matching_keys}")
+
+    return run_json["instance_ids"]
+
+
+def finished_ids(run_dir: Path) -> set[str]:
+    """
+    Return the ids whose latest prediction in preds.jsonl has no agent error.
+
+    Args:
+        run_dir: The run folder being resumed.
+
+    Returns:
+        The ids a resume skips. An empty set when preds.jsonl does not exist
+        yet (the run stopped during its first instance).
+
+    Why:
+        Everything else is rerun: an id with agent_error set crashed (its patch
+        is null and was never scored, since the harness skips null patches), and
+        an id with no line never finished. read_predictions keeps the LAST line
+        per id, the same rule the harness uses, so an errored attempt followed
+        by a successful rerun counts as finished.
+    """
+
+    if not (run_dir / "preds.jsonl").exists():
+        empty_set = set()
+        return empty_set
+
+    predictions = read_predictions(run_dir)
+    finished_ids = []
+
+    for instance_id, prediction in predictions.items():
+
+        if prediction["agent_error"] is None:
+            finished_ids.append(instance_id)
+
+    return set(finished_ids)
+
 def main() -> None:
     """
     Parse the command line, validate the ids, then run each instance in turn.
@@ -154,34 +238,71 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Provide the directory path where run outputs will be placed")
     parser.add_argument("--score-each", action="store_true")
     parser.add_argument("--remove-images", action="store_true")
+    parser.add_argument("--resume", type=Path, default=None)
 
     args = parser.parse_args()
 
     if args.remove_images and not args.score_each:
         parser.error("score-each must be given if remove-images is given.")
 
-    if bool(args.instance_ids) == bool(args.instances_file):
+    if args.resume and (args.instance_ids or args.instances_file):
+        parser.error("Do not give instance ids or instances_file, the ids from run.json")
+
+    elif not args.resume and bool(args.instance_ids) == bool(args.instances_file):
         parser.error("Give either the instance ids or the instances_file.")
 
-    if args.instances_file is None:
-        instance_ids = args.instance_ids
+    config = load_config(args.config)
+    if args.resume:
+
+        run_dir = args.resume
+        instance_ids = load_resume_ids(run_dir, config)
+
+        append_resume(run_dir)
+        done = finished_ids(run_dir)
+
+        print(f"Completed id count: {len(done)}, Incomplete id count: {len(instance_ids) - len(done)}")
 
     else:
-        instance_ids = read_instances_file(args.instances_file)
 
-    config = load_config(args.config)
-    validate_instance_ids(instance_ids, config["dataset"]["name"], config["dataset"]["split"])
+        if args.instances_file is None:
+            instance_ids = args.instance_ids
 
-    run_dir = make_run_dir(args.output_dir)
-    save_run_metadata(run_dir, config, instance_ids)
+        else:
+            instance_ids = read_instances_file(args.instances_file)
+
+        validate_instance_ids(instance_ids, config["dataset"]["name"], config["dataset"]["split"])
+
+        run_dir = make_run_dir(args.output_dir)
+        save_run_metadata(run_dir, config, instance_ids)
+        done = set()
+
     run_tally = Counter()
-
     last_image = None
     scoring_failure = 0
     removal_failure = 0
 
+    if args.score_each and (run_dir / "preds.jsonl").exists() and not score_new_predictions(run_dir, config):
+        scoring_failure += 1
+
+    if args.remove_images:
+        for instance_id in done:
+            image = swebench_image_name(instance_id)
+
+            if image_exists(image) is True:
+                if not remove_image(image):
+                    removal_failure += 1
+
     for index, instance_id in enumerate(instance_ids, start = 1):
+
+        if instance_id in done:
+            continue
+
         print(f"Progress check: [{index}/{len(instance_ids)}] {instance_id}")
+
+        new_path = keep_previous_attempt(run_dir, instance_id)
+
+        if new_path is not None:
+            print(f"Updated Path from previous attempt: {new_path}")
 
         record = run_and_save(run_dir, instance_id, config)
         run_tally[record["exit_status"]] += 1
@@ -206,7 +327,7 @@ def main() -> None:
 
     status_string = ", ".join(status_list)
 
-    print(f"Tally: {status_string}, Scoring failures: {scoring_failure},  Removal failures: {removal_failure}, Run Directory: {run_dir}, Next: python score_run.py {run_dir}")
+    print(f"This session - Tally: {status_string}, Scoring failures: {scoring_failure}, Removal failures: {removal_failure}, Run Directory: {run_dir}, Next: python score_run.py {run_dir}")
 
 
 if __name__ == "__main__":

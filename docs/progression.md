@@ -912,3 +912,59 @@ All checks ran first on scratch paths, with seed 7 and with an id given both on 
   - Polling `docker images` every 2 s, at most two of the three were on disk at once.
   - `score_run.py` then exited 0 and wrote `scores.json` with no images present (3 unresolved, as expected for the stub patch).
   - Instances took 19 s, 5 s and 13 s including pulls. 13109 reused the 3.2 environment pulled for 13033. These times are optimistic, because other django images were already on disk. Pull times for a repo with nothing cached are measured in the 9e pilot.
+
+## Step 9c: Resuming a stopped batch
+
+**Goal.** Let the 500-instance run continue after a Ctrl-C, a reboot or a crash, in the same run folder, without repeating or duplicating any finished instance. The full run is planned as several overnight sessions, so this is what makes stopping in the morning safe.
+
+### What was added
+
+- **`run_batch.py --resume <run_dir>`** continues a run in its own folder. It takes the ids from `run.json`, so neither ids nor `--instances-file` may be given with it, and it prints how many ids are finished and how many will run.
+- **`load_resume_ids`** reads `run.json` and refuses to resume when the config differs from the one the run started with. The error names every top-level key that was added, removed or changed.
+- **`finished_ids`** returns the ids whose latest line in `preds.jsonl` has no `agent_error`. Every other id runs again: one that crashed, and one that never finished.
+- **`records.keep_previous_attempt`** renames an existing trajectory to `<instance_id>.attempt-<n>.json` before the instance runs again, so `save_trajectory` (mode `"x"`) can write the new one.
+- **`records.append_resume`** adds one line per resume to `resumes.jsonl`: the time, the harness commit and dirty flag, and the command line.
+- **`environments.image_exists`** asks Docker whether an image is on disk and returns `True`, `False` or `None` when Docker could not be asked.
+- **At the start of a resume**, `--score-each` scores any finished instance that has no report yet, and `--remove-images` then removes the images of finished instances that are still on disk.
+
+### Design decisions
+
+- **The ids come from `run.json`.** The plan was to compare ids given on the command line with `run.json`. Reading them from `run.json` instead means a resume cannot run a different list, and there is nothing to compare.
+- **A different config is refused, not merged.** `scores.json` averages over the whole folder, so results from two configs in one folder would be wrong with no sign of it. The check runs before `append_resume`, so a refused resume leaves no trace in the folder.
+- **One rule for errored and interrupted instances.** Anything not finished runs again, and an existing trajectory is moved aside first. The code does not need to tell a crash from a stop between `save_trajectory` and `append_prediction`.
+- **Old attempts are renamed, never deleted.** A crashed attempt is evidence. The name `<id>.attempt-<n>.json` does not end in `.traj.json`, so anything that globs trajectories later still finds one per instance.
+- **The last line in `preds.jsonl` wins.** `finished_ids` reuses `read_predictions`, which keeps the last line per id, the same rule the harness applies. An instance that errored and then succeeded counts as finished and is scored on its successful patch. A rerun is scored normally because the harness skips null patches, so an errored instance never had a `report.json`.
+- **Leftover images are removed only when they are on disk.** A stop can leave two images behind. Removing an image that is already gone would print a warning and count a false failure, so `image_exists` is checked first. It returns `None`, not `False`, when the Docker daemon cannot be reached, so "could not check" is never read as "not on disk". Each check takes about 30 ms, about 15 s for 500 ids.
+- **Catch-up scoring comes before any removal**, so an instance that finished just before the stop is scored while its image is still there.
+- **`run.json` stays write-once.** Each resume is recorded in `resumes.jsonl` instead, since a resume can run days later on different harness code.
+
+### Bugs found in review
+
+- **`keep_previous_attempt`:**
+  - `not run_dir / "..."` tested the `Path` object, which is always true, instead of whether the file exists. The function never returned `None`, and the loop looking for a free number never ended.
+  - The f-string held the literal text `<instance_id>`, the count started at 0, the trajectory was never renamed, and the run folder was joined twice.
+  - After the loop was fixed, the first check still lacked `.exists()`, so the first instance of every fresh batch would have crashed with `FileNotFoundError`.
+- **`append_resume`** was copied from `save_run_metadata`: `indent=2` spread one record over 12 lines, and mode `"x"` made the second resume of any run fail with `FileExistsError`.
+- **`image_exists`** read an unreachable Docker daemon as "image absent", since both exit with code 1. It also printed a line for every absent image, which would have been about 480 lines per resume of the full run.
+- **`load_resume_ids`:**
+  - It compared the whole of `run.json` with the config, so every resume was refused.
+  - `a.keys() and b.keys()` returned only the second set of keys, not both.
+  - `not config` tested whether the config was empty instead of whether it lacked the key, and a value lookup ran for keys missing from one side, so an added or removed key raised `KeyError`.
+- **Argument checks:** `args.resume and args.instance_ids or args.instances_file` refused every normal `--instances-file` run, and the either/or check for ids still applied on a resume.
+- **The resume branch:** `load_resume_ids` was given the config's path instead of the loaded config, the fresh-run code still ran after the resume branch (replacing the ids and creating a new folder), and `done` was undefined on a fresh run.
+- **Start-of-resume scoring and removal:** `args.remove_image` for `args.remove_images`, both counters went up on every call instead of only on failures, and each leftover image was removed twice.
+- **The loop** printed the previous-attempt path for every instance, which would have been 500 lines of `None` in a fresh run.
+
+### Verification
+
+- **`keep_previous_attempt`:** no trajectory returns `None`. A first and a second call give `attempt-1` and `attempt-2` with their contents intact. An existing `attempt-3` is skipped, not overwritten. `save_trajectory` succeeds after each rename.
+- **`append_resume`:** two calls give a 2-line file, each line valid JSON with its own `argv`.
+- **`image_exists`** against Docker: `True` for a local image with and without the `docker.io/` prefix, `False` for an absent one, and `None` for an unreachable daemon, a mocked timeout and a missing `docker` binary.
+- **`load_resume_ids`** on run `2026-10-27T18-43-12`: the run's own config and the current `default.yaml` return its 25 ids in order. A changed, added or removed key, or several at once, raises one `ValueError` naming all of them.
+- **`finished_ids`:** an empty set without `preds.jsonl`, and the last line deciding for an id that errored and then succeeded, or the reverse.
+- **Argument checks:** `--instances-file` alone, ids alone and `--resume` alone pass. `--resume` with ids or a file, and no ids at all, are refused.
+- **End to end against Docker**, with `Agent.run` stubbed (no API calls) on four pool ids whose images were not on disk, as two separate processes:
+  - Session 1 ran django-13128, then django-13212, whose agent raised `ConnectionError`, then django-13033, followed by a `KeyboardInterrupt` before it was scored. That left 13033 unscored and two images on disk.
+  - Session 2 (`--resume --score-each --remove-images`) reported 2 finished and 2 to run. It scored 13033 first, removed its image, reran 13212 (keeping the crashed trajectory as `django__django-13212.attempt-1.json`), ran django-14999, and ended with no images on disk and 0 failures. At most two of the four images were on disk at once.
+  - `preds.jsonl` held 5 lines (13212 twice) and `resumes.jsonl` one line. `score_run.py` then scored all four with no images present. 13212 counted as unresolved, not as an agent error, so its later line won.
+- **Not covered:** a trajectory without a preds line (a stop between `save_trajectory` and `append_prediction`). `keep_previous_attempt` handles it the same way as a crashed instance, which its unit tests cover.

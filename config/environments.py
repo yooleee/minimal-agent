@@ -78,6 +78,48 @@ def remove_image(image: str) -> bool:
 
     return True
 
+
+def image_exists(image: str) -> bool | None:
+    """
+    Check whether an image is in the local Docker cache, without pulling it.
+
+    Args:
+        image: Image reference, e.g. from swebench_image_name().
+
+    Returns:
+        True if the image is on disk, False if it is not, None if Docker could
+        not be asked (timeout or docker not found).
+
+    Why:
+        A resumed batch removes the images an interrupted session left behind,
+        but only those still on disk: calling remove_image on an absent image
+        would print a warning and count a false removal failure. None is kept
+        apart from False, so "could not check" is never read as "not there".
+        `docker image inspect` accepts the docker.io/ prefix that
+        swebench_image_name adds, unlike matching the `docker images` listing
+        (about 30 ms per call, so checking all 500 ids takes about 15 s).
+    """
+
+    try:
+        result = subprocess.run(
+            ["docker", "image", "inspect", image],
+            capture_output=True, text=True,
+            timeout=30, check = False
+        )
+
+    except (subprocess.TimeoutExpired, OSError) as e:
+        print(f"Image {image} could not be verified: {e}")
+        return None
+
+    if result.returncode != 0:
+        if "No such image" in result.stderr:
+            return False
+
+        print(f"Image {image} could not be checked: {result.stderr.strip()}")
+        return None
+
+    return True
+
 class Environment(Protocol):
     """
     Structural interface every environment satisfies (no inheritance needed).
@@ -90,7 +132,6 @@ class Environment(Protocol):
     def start(self) -> None: ...
     def execute(self, command: str) -> dict: ...
     def cleanup(self) -> None: ...
-
 
 class DockerEnvironment:
     """Runs each command via `docker exec` in a container this object owns."""
