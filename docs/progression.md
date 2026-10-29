@@ -968,3 +968,77 @@ All checks ran first on scratch paths, with seed 7 and with an id given both on 
   - Session 2 (`--resume --score-each --remove-images`) reported 2 finished and 2 to run. It scored 13033 first, removed its image, reran 13212 (keeping the crashed trajectory as `django__django-13212.attempt-1.json`), ran django-14999, and ended with no images on disk and 0 failures. At most two of the four images were on disk at once.
   - `preds.jsonl` held 5 lines (13212 twice) and `resumes.jsonl` one line. `score_run.py` then scored all four with no images present. 13212 counted as unresolved, not as an agent error, so its later line won.
 - **Not covered:** a trajectory without a preds line (a stop between `save_trajectory` and `append_prediction`). `keep_previous_attempt` handles it the same way as a crashed instance, which its unit tests cover.
+
+## Step 9d: Stopping on consecutive errors, and a pre-run checklist
+
+**Goal.** Keep an API or Docker Hub outage from marking every remaining id of the 500 run as an error. The batch stops after 3 `Error` records in a row, and `--resume` continues it once the outage is over.
+
+### What was added
+
+- **`MAX_CONSECUTIVE_ERRORS = 3`** in `run_batch.py`. The loop keeps the error dicts of the current streak in `consecutive_errors`, appends one for each `Error` record and empties the list on any other status.
+- **The stop.** When the streak reaches 3, the loop breaks at the end of the iteration. The batch prints each error's type and the first line of its message, then the tally line with the `--resume` command as the next step, and exits with code 1. A batch that finishes keeps exit code 0 and points to `score_run.py`.
+- **Image removal checks `image_exists` first** in the loop and after it, as the resume block already did.
+- **A pre-run checklist** in the `run_batch.py` header: `docker login` or a decision to stay anonymous, a check of the Docker Hub limit, `HF_HUB_OFFLINE=1`, and `caffeinate -i`.
+- **`instances/all_500.txt`**, all 500 Verified ids in (repo, version) order from `sample_instances.py --n 500 --seed 1001 --order-by-env`. The seed does not affect a sample of every id. It is recorded for the header.
+
+### Design decisions
+
+- **A fixed constant, not a flag.** The threshold does not change results, so `run.json` does not need it, and there is no measured reason to tune it. A flag can be added later without changing anything else.
+- **The streak is a list, not a count**, so the stop message can show the errors. They are how a person tells an outage from a broken environment.
+- **The break comes last in the iteration.** By then the instance is scored and the previous image removed, so the stop goes through the same post-loop removal as a normal end. Errored instances have null patches, so there is nothing more to score.
+- **A different exit code for a stop.** "Stopped" and "finished" are different states, and a wrapper script can tell them apart.
+- **The removal guard fixes an existing miscount.** A refused pull leaves no image, so `remove_image` failed and counted a removal failure. In a Docker Hub outage that would have reported 3 false failures.
+- **`HF_HUB_OFFLINE=1` is about stalls, not crashes.** With datasets 5.1.0, `load_dataset` fell back to the cache in every failure tested and never raised. A hub that refused connections or returned 503 or 429 cost about 25 s per load, and a hub that accepted connections but never answered cost about 415 s. Online the load takes 1.6 s, offline 0.3 s. `load_instance` runs once per instance outside `run_instance`'s `try`, so the stall would repeat for every id. A missing or corrupt cache was not tested. Offline, it would raise before any API call.
+- **The Docker Hub limit is higher than the plan assumed.** An anonymous HEAD request for `ratelimitpreview/test`, which is not counted, returned `ratelimit-limit: 100;w=3600` for this IP on 2026-10-29, not the 10 per hour reported for the 2025 policy. Docker's documentation gives 100 per 6 hours anonymous and 200 per 6 hours for a free Personal account, so the measured header and the documentation disagree. The batch runs at about 30 pulls per hour at most, under either limit. Docker Desktop is now signed in, and the CLI uses that sign-in through its credential store. The authenticated limit was not measured.
+
+### Bugs found in review
+
+- **The inner loop over `error.items()`** printed every key and value pair, so each error took three lines ("Error type type", "Error type message", and the whole traceback).
+- **The first stop message** gave two next steps: the tally line still pointed to `score_run.py` above the `--resume` command.
+- **Moving the tally line into an `else`** dropped it from a stopped session, which is when the failure counts matter most.
+- **The tally parts kept their `", "` endings** while `print(*parts)` added its own space, which put two spaces between fields.
+- **The message label read "No message:"** in front of every message, not only empty ones.
+- **Repetition:** the tally line was written out twice, and the first line of the message was computed twice. Both now exist once.
+
+### Verification
+
+All runs stubbed `run_instance`, `image_exists`, `remove_image` and `score_new_predictions`, so there were no API calls, Docker calls or harness runs, on real pool ids:
+
+- **ok, Error, Error, Error, then two more ids:** stopped after the 4th id, never ran the last two, exit code 1. Three error lines and one tally line with the `--resume` command.
+- **Resume of that folder, all ok:** 1 finished and 5 to run, the 3 errored ids kept as `attempt-1`, exit code 0.
+- **ok, Error, Error, ok, Error, Error:** the streak reset, all 6 ran, exit code 0.
+- **An error with an empty message** (`str(TimeoutError())` is `''`): printed "No message" instead of raising `IndexError`.
+- **Images never pulled:** `image_exists` was checked before each removal, with 0 `docker rmi` calls and 0 removal failures.
+- **Not covered by stubs:** the guard with an image that is on disk. It is the same code as the resume block, which Step 9c checked against Docker.
+
+## Step 9e: The pilot (first 20 ids of the real run)
+
+**Goal.** Start the real 500 run, stop after 20 instances, and measure pull time, disk, scoring overhead and resume before the go-ahead for the rest. This entry is partial. The full-run results go in Step 9f.
+
+### The pilot
+
+Run `2026-10-29T09-34-15` on `instances/all_500.txt` with `config/default.yaml`, `--score-each --remove-images` and `HF_HUB_OFFLINE=1`, under `caffeinate -i`. Docker Desktop was signed in, so pulls were authenticated. The first 20 ids in environment order are all astropy, so none of the timings below come from django (231 of the 500).
+
+### Results
+
+- **All 20 ended `Submitted`**, with no errors, scoring failures or removal failures. They took 8.3 steps on average (at most 14).
+- **Time per instance: 136 s on average** (60 to 259 s), from one `Progress check` line to the next. That covers the pull, the agent run, saving, scoring and removing the previous image. The 20 took 45 min.
+  - **Pull and agent run: 71 s on average.** 17 of the 20 images were pulled, each in 2 to 14 s, because neighbouring astropy images share their environment layers.
+  - **Scoring and image removal: 66 s on average** (21 to 100 s). It was about 22 s within the first environment and 90 to 100 s in the later astropy environments. In Step 8d, one harness call over 25 instances took about 30 s per instance, so scoring one instance at a time now takes about half of each instance's time.
+- **Disk.** Docker images stayed between 42.5 and 46.6 GB, against 44.4 GB at the start, while the dev_25 astropy images left over from Step 8d were removed in turn. Bytes pulled per instance were not measured separately.
+- **Cost:** $0.18 computed from the token counts, about $0.0089 per instance. The OpenAI dashboard has run about 9% above the computed figure over all runs so far ($1.94 against $1.78).
+- **Resume, for real.** `--resume` reported 20 finished and 480 to run. The harness found nothing left to score, the last finished image was removed, and the batch stopped at `[21/500]` before any API call. `run_instance`'s `finally` removed the container, and `preds.jsonl` kept its 20 lines.
+
+### An interruption bug in the pilot script (not in the harness)
+
+The pilot was started as a background job of a shell script, which then sent `SIGINT` at `[21/500]`. A background job of a non-interactive shell inherits `SIGINT` as ignored, and Python then never installs its `KeyboardInterrupt` handler, so the signal did nothing and instance 21 kept running. It was stopped with `SIGTERM`, which skips `finally`, so its container was removed by hand. Nothing was saved for it, and it runs again on resume. About one instance's API cost (under $0.01) was lost. A Ctrl-C in a terminal is not affected. A script that stops a batch must restore the handler in the child (`signal.signal(signal.SIGINT, signal.default_int_handler)`), which is how the resume check was run.
+
+### Re-estimate
+
+- **Time:** 480 ids × 136 s ≈ 18 h, so about 19 h for the whole run. The 8d per-instance agent time was about the same for django as for astropy (70 s), but scoring time per repo is not known yet.
+- **Cost:** 480 × $0.0089 ≈ $4.30 computed, about $4.70 on the dashboard, so about $5 for the whole run. The ceiling is still about $40 (the 50-step cap).
+
+### Open items
+
+- Scoring in small groups instead of one instance at a time could save part of the 66 s, at the cost of a few more images on disk. Not planned for this run.
+- The authenticated Docker Hub limit was not measured. At about 26 pulls per hour, the run stays under the documented 200 per 6 hours.

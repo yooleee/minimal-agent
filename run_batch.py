@@ -13,10 +13,22 @@
 #                  Apple Silicon, parallel containers mostly compete for CPU.
 #                  Revisit with an x86 host or batches of more than ~50.
 #                  --resume <run_dir> continues a stopped run in its own folder.
+#                  The batch stops after MAX_CONSECUTIVE_ERRORS Errors in a
+#                  row (exit code 1). Continue it with --resume.
+#                  Before a long run:
+#                    1. docker login, or decide to stay anonymous. Check the
+#                       limit with a HEAD request to Docker Hub's
+#                       ratelimitpreview/test manifest, which is not counted
+#                       (ratelimit-limit and ratelimit-remaining headers).
+#                    2. export HF_HUB_OFFLINE=1, so a slow or unreachable
+#                       Hugging Face hub cannot stall each instance's dataset
+#                       load (measured: 25 s to 7 min before the cache is used).
+#                    3. Run under `caffeinate -i` so the Mac stays awake.
 # =============================================================================
 
 import argparse
 import json
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -36,6 +48,10 @@ from run_single import (
     load_config,
     run_and_save,
 )
+
+# Max error value is 3 because a single error is normal noise while three in a row
+# could represent an error or outage occurring.
+MAX_CONSECUTIVE_ERRORS = 3
 
 
 def read_instances_file(path: Path) -> list[str]:
@@ -280,6 +296,8 @@ def main() -> None:
     last_image = None
     scoring_failure = 0
     removal_failure = 0
+    consecutive_errors = []
+    stopped = False
 
     if args.score_each and (run_dir / "preds.jsonl").exists() and not score_new_predictions(run_dir, config):
         scoring_failure += 1
@@ -308,18 +326,33 @@ def main() -> None:
         run_tally[record["exit_status"]] += 1
         image = swebench_image_name(instance_id)
 
+        if record["exit_status"] == "Error":
+            consecutive_errors.append(record["error"])
+
+        else:
+            consecutive_errors = []
+
         if args.score_each and not score_new_predictions(run_dir, config):
             scoring_failure += 1
 
+        # A refused pull leaves no image, so removing it would count a false failure.
         if args.remove_images and last_image is not None:
-            if not remove_image(last_image):
-                removal_failure += 1
+            if image_exists(last_image) is True:
+                if not remove_image(last_image):
+                    removal_failure += 1
 
         last_image = image
 
+        # Checked last, so this instance is already scored and the post-loop
+        # removal handles the last image the same way as a normal end.
+        if len(consecutive_errors) == MAX_CONSECUTIVE_ERRORS:
+            stopped = True
+            break
+
     if args.remove_images and last_image is not None:
-        if not remove_image(last_image):
-            removal_failure += 1
+        if image_exists(last_image) is True:
+            if not remove_image(last_image):
+                removal_failure += 1
 
     status_list = []
     for status, count in run_tally.items():
@@ -327,8 +360,33 @@ def main() -> None:
 
     status_string = ", ".join(status_list)
 
-    print(f"This session - Tally: {status_string}, Scoring failures: {scoring_failure}, Removal failures: {removal_failure}, Run Directory: {run_dir}, Next: python score_run.py {run_dir}")
+    tally_parts = [
+        f"This session - Tally: {status_string}",
+        f"Scoring failures: {scoring_failure}",
+        f"Removal failures: {removal_failure}",
+        f"Run Directory: {run_dir}"
+    ]
+    if stopped:
 
+        for error in consecutive_errors:
+            first_line = error["message"].partition("\n")[0]
+
+            if first_line == "":
+                print(f"Error type {error["type"]}, No message")
+
+            else:
+                print(f"Error type {error["type"]} because of {first_line}")
+
+        tally_parts.append(f"Next Command: python run_batch.py --resume {run_dir} --score-each --remove-images")
+
+    else:
+        tally_parts.append(f"Next Command: python score_run.py {run_dir}")
+
+    tally_string = ", ".join(tally_parts)
+    print(tally_string)
+
+    if stopped:
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
