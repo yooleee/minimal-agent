@@ -1042,3 +1042,88 @@ The pilot was started as a background job of a shell script, which then sent `SI
 
 - Scoring in small groups instead of one instance at a time could save part of the 66 s, at the cost of a few more images on disk. Not planned for this run.
 - The authenticated Docker Hub limit was not measured. At about 26 pulls per hour, the run stays under the documented 200 per 6 hours.
+
+## Steps 9f and 9g: Full 500-instance run and results
+
+**Goal.** Record the first run of the harness on all 500 SWE-bench Verified instances. It is the baseline for Stage 12, which compares variants on the 360 held-out ids from Step 9a.
+
+### The run
+
+Run `2026-10-29T09-34-15` on `instances/all_500.txt`, at commit `5d65428` (clean tree) from the `../minimal_agent-baseline` git worktree, with `config/default.yaml` (gpt-5.6-luna), `HF_HUB_OFFLINE=1` and `caffeinate -i`. It ran in four sessions, recorded in `resumes.jsonl`:
+
+| Session | Local time (2026-10-29) | Instances | Flags |
+|---|---|---|---|
+| Pilot (Step 9e) | 02:34 to 03:19 | 1 to 20 | `--score-each --remove-images` |
+| Resume check | 03:22 | none | `--score-each --remove-images` (tree dirty, uncommitted 9d code) |
+| Main | 03:26 to 19:28 | 21 to 485 | `--score-each --remove-images`, stopped by hand (see below) |
+| Final | 19:28 to 19:56 | 486 to 500, plus the django-15375 rerun | `--resume` only |
+
+`score_run.py` then scored the 18 predictions without a report (19:56 to 20:47). The whole run took about 18 h of wall time.
+
+### Results
+
+**344 of 500 resolved (68.8%), with a Wilson 95% interval of 64.6% to 72.7%.**
+
+| Status | Count |
+|---|---|
+| `resolved` | 344 |
+| `unresolved` | 154 |
+| `empty_patch` | 1 (`matplotlib__matplotlib-25122`) |
+| `error` | 1 (`sympy__sympy-19040`, tests timed out) |
+| `agent_error`, `capture_failed` | 0, 0 |
+
+- **By split** (Step 9a): held-out 360 is 249 resolved (69.2%, interval 64.2% to 73.7%). Pool 140 is 95 resolved (67.9%, interval 59.7% to 75.0%). The held-out figure is the one Stage 12 compares against.
+- **The 25 dev ids** (Step 8d) resolved 18 of 25. The four 8d baseline runs gave 14, 16, 18 and 16, so this is at the top of that range and not evidence of a change.
+- **By repo:**
+
+| Repo | Resolved | Rate |
+|---|---|---|
+| pytest | 17/19 | 89% |
+| scikit-learn | 27/32 | 84% |
+| xarray | 16/22 | 73% |
+| django | 167/231 | 72% |
+| sphinx | 29/44 | 66% |
+| astropy | 14/22 | 64% |
+| sympy | 47/75 | 63% |
+| matplotlib | 21/34 | 62% |
+| requests | 2/8 | 25% |
+| pylint | 2/10 | 20% |
+| seaborn | 1/2 | 50% |
+| flask | 1/1 | 100% |
+
+- **Failure labels** (Step 8c): 8 instances carry the harness's `ambiguous` label, none `infra`. 4 of pylint's 8 unresolved instances are among them (`missing_module` twice, `no_tests_collected` twice), and 2 pytest instances have `no_tests_collected`. These labels mean the logs match a pattern that a bad patch or the environment could both cause. The pylint and requests rates rest on 10 and 8 instances, so they are places to look, not findings.
+- **Agent behaviour:** all 500 trajectories ended `Submitted` (django-15375 after one rerun). Steps averaged 9.4 (median 8, at most 37). No run reached the 50-step cap.
+- **Cost:** $5.07 computed from the token counts, including the errored first attempt of django-15375. That is about $0.010 per instance, or about $5.50 on the dashboard at the usual 9% gap.
+
+### Time
+
+The main session ran 465 instances in 16 h, about 124 s each. Agent time alone averaged 89 s (median 78 s). Time per instance, from one instance's start to the next, by repo:
+
+| Repo | Per instance | Agent alone |
+|---|---|---|
+| django | 108 s | 82 s |
+| scikit-learn | 101 s | 77 s |
+| pytest | 109 s | 86 s |
+| sphinx | 125 s | 105 s |
+| xarray | 132 s | 101 s |
+| sympy | 156 s | 94 s |
+| astropy | 157 s | 72 s |
+| pylint | 161 s | 137 s |
+| matplotlib | 169 s | 104 s |
+
+Sympy, astropy and matplotlib spend about as long scoring as running. Shards with equal counts but different repo mixes (Step 12a) will therefore not finish together.
+
+### A scoring timeout that repeats (`--score-each`)
+
+`sympy__sympy-19040`'s patch makes the test suite hang. The harness stopped it at its 1800 s timeout and wrote no `report.json`. `score_new_predictions` relies on the harness skipping every id that has a report, so the timed-out id was evaluated again after every later instance, adding 30 min each time. It was found after two rounds (19346 waited behind it). With 15 ids left, it would have added about 7.5 h.
+
+The batch was stopped with `SIGINT` (the launcher restores the handler, Step 9e), which also killed the harness subprocess. The hung evaluation container was removed by hand. The last 16 ids were run with `--resume` alone (the resume check compares the config, not the flags), and `score_run.py` scored all 18 remaining predictions in one call, with one 30 min timeout. Nothing was lost and no API call was repeated.
+
+This is a gap in Step 9b's design, and sharded runs would hit it the same way. It needs fixing before Stage 12. One option is to skip, for the rest of a session, ids whose scoring has already failed once, and leave them to `score_run.py`.
+
+### Open items
+
+- The scoring-timeout fix above.
+- The stop message prints the first line of each error. For Docker, that line is "Unable to find image ... locally", and the real cause is on the last line.
+- The final line says "Next command" after a stop and "Next Command" after a normal end.
+- The authenticated Docker Hub limit was not measured. At about 29 instances per hour, at most one pull each, no pull was refused for the rate limit. The one failed pull (django-15375) was a layer download error from the CDN.
