@@ -9,7 +9,7 @@ Working rules for every step: the code is written from skeletons with numbered T
 - **Stage 9 baseline:** 344 of 500 resolved (68.8%, 95% interval 64.6% to 72.7%). On the held-out 360 it is 249 (69.2%). Run `2026-10-29T09-34-15`, details in `progression.md` Steps 9f and 9g.
 - **Data split (Step 9a):** `instances/heldout_360_seed1001.txt` is the comparison set and is not read or tuned on until Stage 12. `instances/pool_140_seed1001.txt` (which includes dev_25) is the only data that Stage 10 design and Stage 11 tuning may look at.
 - **Measured costs:** about $0.010 and 124 s per instance (89 s of it agent time) on the Mac, sequential, with `--score-each --remove-images`.
-- **Started early:** Step 12a (sharding) is being built now, in the main checkout. `shard_instances.py` is done (12a.1 to 12a.6). `merge_scores.py` is in progress (12a.7 and 12a.8 done).
+- **Started early:** Step 12a (sharding). `shard_instances.py` and `merge_scores.py` are done and checked on toy inputs and on the baseline run split in two (`progression.md` Step 12a). The stubbed two-shard run is next.
 
 ## Stage 9: what remains
 
@@ -45,7 +45,9 @@ The Step 6b problem is still open: a first reply often narrates a whole session 
 
 ## Stage 12: Three-arm comparison on the held-out 360
 
-- **12a. Sharding (in progress).** Split an ids file into N shards of whole (repo, version) groups, run each shard as its own `run_batch.py` process into its own folder, then merge the scores with checks (same config, dataset, split and harness version, disjoint ids, exact coverage, every shard fully scored). Verify with toy inputs and a stubbed two-shard run. A real shard timing pilot needs its own go-ahead and must not overlap another batch.
+- **12a. Sharding (scripts done, two checks left).** `shard_instances.py` splits an ids file into shards of whole (repo, version) groups, each shard runs as its own `run_batch.py` process into its own folder, and `merge_scores.py` merges the scores with checks.
+  - **Stubbed two-shard run (next, no API, no Docker).** Shard about 6 pool ids into 2, run each shard file through `run_batch.py` with `Agent.run` and `DockerEnvironment.start` stubbed, score each folder with `score_run.py` with the harness stubbed, then merge against the original ids file. The merged summary must match the stubbed results. Then leave one shard partly scored and check that the merge refuses it.
+  - **Real shard timing pilot.** Needs its own go-ahead and must not overlap another batch. It is the only check of two shards running at the same time (Docker images, disk, rate limits).
 - **12b. The runs.** Baseline, arm 2 and arm 3, one run each on all 360, plus one repeat baseline run to measure run-to-run noise on this set. Arms are interleaved or run in parallel so time-of-day and API drift affect all of them.
 - **12c. Analysis rules (fixed in advance, see 9j):**
   - Primary metric: resolved rate, analysed per instance in pairs, with an exact McNemar test and a paired bootstrap interval on the difference.

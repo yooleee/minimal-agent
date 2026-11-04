@@ -1127,3 +1127,49 @@ This is a gap in Step 9b's design, and sharded runs would hit it the same way. I
 - The stop message prints the first line of each error. For Docker, that line is "Unable to find image ... locally", and the real cause is on the last line.
 - The final line says "Next command" after a stop and "Next Command" after a normal end.
 - The authenticated Docker Hub limit was not measured. At about 29 instances per hour, at most one pull each, no pull was refused for the rate limit. The one failed pull (django-15375) was a layer download error from the CDN.
+
+## Step 12a: Sharding, splitting and merging (built early)
+
+**Goal.** Make the Stage 12 runs on the held-out 360 shorter by running several `run_batch.py` processes at once, each on its own part of the ids, and then combining their scores into one result that can be trusted as much as a single run. Built during the Stage 9 baseline run, in the main checkout. Only the two scripts are done. The runs themselves are not yet tested together (see the end of this entry).
+
+### What was added
+
+- **`shard_instances.py --instances-file <ids file> --shards N`** writes `<stem>.shard-<k>-of-<N>.txt` next to the ids file, one per shard, with header lines `source=`, `shard=k/N`, `n=`, `dataset=`, `split=`, `created=` and `order=repo,version`. It prints the per-repo counts of each shard.
+- **`shard_ids`** groups the ids by (repo, version), assigns the groups largest first, each to the shard with the fewest ids so far, and returns each shard in environment order through `order_by_environment`. It refuses fewer than 1 shard, ids with no environment, and fewer groups than shards.
+- **`merge_scores.py <run_dir>... --instances-file <original ids file> --output <path>`** reads each shard's `run.json` and `scores.json`, checks them, and writes one merged file with the shape of a `scores.json`, except that `run_ids` lists every shard's run id in place of one `run_id`.
+- **`check_shards`** refuses the merge when a shard's config, dataset, split or `swebench_version` differs from the first shard's, when an id is in more than one shard, when the shards and the original ids file differ in either direction, or when a shard's `scores.json` lacks any of its ids. All problems are reported in one `ValueError`.
+
+### Design decisions
+
+- **Whole (repo, version) groups per shard.** Within a shard, Step 9b's image removal keeps layers shared between neighbours. Across shards, one process could remove an image that another is about to use.
+- **Greedy LPT ("longest processing time first").** Groups are sorted by size, ties broken by the (repo, version) key, so the same input always gives the same shards. On `all_500` it gives 250 and 250, then 167, 167 and 166, then 4 × 125 and 5 × 100. On `heldout_360` it gives exactly equal counts for 2 to 5 shards. Equal counts are not equal times, since repos take different times to score (Steps 9f and 9g).
+- **A separate script from `sample_instances.py`.** Sharding splits a file that already exists and draws no sample.
+- **The merged summary is recounted from the instances**, not added up from the shards' summaries, so it cannot disagree with them. Every status in `STATUSES` is kept, including those at 0, and an unknown status raises `KeyError`.
+- **The merge is checked, not trusting.** A score from mixed configs or harness versions, or with an id counted twice or missing, would look normal and be wrong. The same reasoning made `--resume` refuse a different config (Step 9c).
+- **The output is written with mode `"x"`**, like `save_scores`, so an earlier merge is never overwritten. It belongs to no shard, so its path is required and given separately.
+- **A missing `run.json` or `scores.json` stops at once** with a message naming the file. Every other problem is collected first.
+
+### Bugs found in review
+
+- **`shard_ids`:**
+  - The grouping overwrote each group instead of appending to it, and the `defaultdict` was created inside the loop.
+  - The sort negated a string (`-item[1]`) instead of the group's length, and `reverse=True` then reversed the order a second time.
+  - The groups were extended inside the loop over shards, and the index of the smallest shard was not reset for each group.
+  - Ordering each shard rebound the loop variable, which left the list unchanged.
+- **`shard_instances.py main`:** `args.run_dir` and `args.shard` for arguments that do not exist, `{k/n}` in the file name (a division, not "k/N"), a slash in the file name, and a missing dash in it.
+- **`check_shards`:**
+  - A chained `in` and `!=` comparison was always false, so a mismatch was never found. The two values in the message were swapped, and the shard's position was off by one.
+  - The ids were read from `"instance_id"`, not `"instance_ids"` (`KeyError`), and the message for extra ids printed the expected ids.
+  - A list was used as a dict key (`TypeError`), and the missing-score message was added for every shard, even complete ones.
+  - The final `ValueError` was given two arguments, so it printed a tuple.
+- **`merge_shard_scores`:** no `return`, and `run_ids` held each shard's instance ids, then read `run_id` from `run.json`, which has none. It is in `scores.json`.
+- **`merge_scores.py main`:** `args.instance_file` for `args.instances_file`, a call to `args.output.parent` as if it were a function, and a loop over the summary's keys that indexed them as dicts.
+
+### Verification
+
+No API calls and no Docker:
+
+- **`shard_ids`** on `all_500` and `heldout_360` for 2 to 5 shards: the counts above, every id exactly once, and the refusals for 0 shards, a missing environment and more shards than groups. `shard_instances.py` on a copy of `all_500.txt` with 2 shards wrote two files of 250 ids plus their headers.
+- **`merge_scores.py`** on two shard folders made by splitting the baseline run `2026-10-29T09-34-15` into halves of 250: 344 resolved, 154 unresolved, 1 empty patch and 1 error, with 500 instances, the same as the run's own `scores.json`.
+- **Refusals through the script:** a second merge to the same path (`FileExistsError`), a missing shard folder (`FileNotFoundError` naming `run.json`), and one shard with a different split, a different config, an id from the other shard and one score removed, which gave one `ValueError` listing all 4 problems and wrote no file.
+- **Not yet covered:** the shard files run through `run_batch.py` and `score_run.py`, with a stubbed agent and harness, and then merged. The test above split one existing run, so it cannot catch a mismatch between what those scripts write for a shard and what `merge_scores.py` reads. Two shards running at the same time on one machine (Docker images, disk, rate limits) are also untested. Only the real shard timing pilot shows that.
