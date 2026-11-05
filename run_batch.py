@@ -41,7 +41,7 @@ from handling.records import (
     make_run_dir,
     save_run_metadata,
 )
-from handling.scoring import read_predictions, run_harness
+from handling.scoring import evaluation_states, read_predictions, run_harness
 from run_single import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_OUTPUT_DIR,
@@ -134,25 +134,35 @@ def score_new_predictions(run_dir: Path, config: dict) -> bool:
         config: The loaded config (for the dataset name and split).
 
     Returns:
-        True if the harness ran, False if it failed (a warning is printed).
+        True if the harness ran or there was nothing to evaluate, False if it
+        failed (a warning is printed).
 
     Why:
         The image must still be present when an instance is scored, or the
-        harness pulls it again. run_harness passes every id in preds.jsonl, but
-        swebench 5.0.2 skips ids that already have a report.json for this run id
-        (run_evaluation.get_dataset_from_preds), so only the new one is
-        evaluated. A failure here must not stop a multi-day batch: score_run.py
-        at the end evaluates any id that still has no report.
+        harness pulls it again. Only ids the harness has never evaluated are
+        passed (scoring.evaluation_states). An id that was evaluated but has
+        no report.json (a test timeout, a crash) is left to score_run.py,
+        which evaluates every id still without a report. Passing every id
+        instead evaluated a timed-out id again after every later instance,
+        30 min each time (Step 9f). A failure here must not stop a multi-day
+        batch, for the same reason.
     """
+    predictions = read_predictions(run_dir)
+    evaluations = evaluation_states(run_dir, predictions)
 
-    try:
-        run_harness(run_dir, config["dataset"]["name"], config["dataset"]["split"])
+    if evaluations["unevaluated"] == []:
+        return True
 
-    except RuntimeError as e:
-        print(f"Scoring failed at {run_dir} due to {e}, retry will occur at the end.")
-        return False
+    else:
 
-    return True
+        try:
+            run_harness(run_dir, config["dataset"]["name"], config["dataset"]["split"], instance_ids=evaluations["unevaluated"])
+
+        except RuntimeError as e:
+            print(f"Scoring failed at {run_dir} due to {e}, retry will occur at the end.")
+            return False
+
+        return True
 
 
 def load_resume_ids(run_dir: Path, config: dict) -> list[str]:
@@ -278,6 +288,13 @@ def main() -> None:
 
         print(f"Completed id count: {len(done)}, Incomplete id count: {len(instance_ids) - len(done)}")
 
+        if (run_dir / "preds.jsonl").exists():
+            predictions = read_predictions(run_dir)
+            evaluations = evaluation_states(run_dir, predictions)
+
+            if evaluations["no_report"]:
+                print(f"{len(evaluations["no_report"])} Unreported ids are left to score_run.py: {evaluations["no_report"]}")
+
     else:
 
         if args.instances_file is None:
@@ -360,6 +377,9 @@ def main() -> None:
 
     status_string = ", ".join(status_list)
 
+    if not run_tally:
+        status_string = "nothing ran"
+
     tally_parts = [
         f"This session - Tally: {status_string}",
         f"Scoring failures: {scoring_failure}",
@@ -369,13 +389,16 @@ def main() -> None:
     if stopped:
 
         for error in consecutive_errors:
-            first_line = error["message"].partition("\n")[0]
+            print(f"Error type {error["type"]}")
+            lines = error["message"].splitlines()
 
-            if first_line == "":
-                print(f"Error type {error["type"]}, No message")
+            if error["message"].strip() == "":
+                print("   No message")
 
             else:
-                print(f"Error type {error["type"]} because of {first_line}")
+                for line in lines:
+                    if line.strip() != "":
+                        print(f"   {line}")
 
         tally_parts.append(f"Next Command: python run_batch.py --resume {run_dir} --score-each --remove-images")
 

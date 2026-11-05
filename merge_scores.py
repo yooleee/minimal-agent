@@ -145,8 +145,9 @@ def merge_shard_scores(shards: list[dict]) -> dict:
         shards: Results of load_shard that passed check_shards.
 
     Returns:
-        {"run_ids": [each shard's run_id], "dataset": str, "split": str,
-         "swebench_version": str,
+        {"run_ids": [each shard's run_id],
+         "run_dirs": [each shard's run_dir, as given on the command line],
+         "dataset": str, "split": str, "swebench_version": str,
          "summary": {status: count for every status in STATUSES},
          "instances": {instance_id: the shard's per-instance entry}}.
 
@@ -154,9 +155,14 @@ def merge_shard_scores(shards: list[dict]) -> dict:
         The same shape as one scores.json, with run_ids in place of run_id,
         so anything that reads summary and instances works on either. The
         summary is recounted from the instances and not added up from the
-        shards' summaries, so it can never disagree with them.
+        shards' summaries, so it can never disagree with them. run_dirs is
+        kept because run_ids alone may not identify the shards: a run id is
+        the folder's start time to the second, and shards started together
+        in separate output folders get the same one (the Step 12a stubbed
+        run gave two shards '2026-11-05T09-30-12').
     """
     merged_scores = {}
+    run_dirs = []
 
     for shard in shards:
         merged_scores.update(shard["scores"]["instances"])
@@ -169,10 +175,12 @@ def merge_shard_scores(shards: list[dict]) -> dict:
     run_ids = []
     for shard in shards:
 
+        run_dirs.append(str(shard["run_dir"]))
         run_ids.append(shard["scores"]["run_id"])
 
     return_dict = {
         "run_ids": run_ids,
+        "run_dirs": run_dirs,
         "dataset": shards[0]["scores"]["dataset"],
         "split": shards[0]["scores"]["split"],
         "swebench_version": shards[0]["scores"]["swebench_version"],

@@ -1136,7 +1136,7 @@ This is a gap in Step 9b's design, and sharded runs would hit it the same way. I
 
 - **`shard_instances.py --instances-file <ids file> --shards N`** writes `<stem>.shard-<k>-of-<N>.txt` next to the ids file, one per shard, with header lines `source=`, `shard=k/N`, `n=`, `dataset=`, `split=`, `created=` and `order=repo,version`. It prints the per-repo counts of each shard.
 - **`shard_ids`** groups the ids by (repo, version), assigns the groups largest first, each to the shard with the fewest ids so far, and returns each shard in environment order through `order_by_environment`. It refuses fewer than 1 shard, ids with no environment, and fewer groups than shards.
-- **`merge_scores.py <run_dir>... --instances-file <original ids file> --output <path>`** reads each shard's `run.json` and `scores.json`, checks them, and writes one merged file with the shape of a `scores.json`, except that `run_ids` lists every shard's run id in place of one `run_id`.
+- **`merge_scores.py <run_dir>... --instances-file <original ids file> --output <path>`** reads each shard's `run.json` and `scores.json`, checks them, and writes one merged file with the shape of a `scores.json`, except that `run_ids` lists every shard's run id in place of one `run_id`, and `run_dirs` lists every shard's folder as given on the command line (added in Step 9h, after the stubbed run below).
 - **`check_shards`** refuses the merge when a shard's config, dataset, split or `swebench_version` differs from the first shard's, when an id is in more than one shard, when the shards and the original ids file differ in either direction, or when a shard's `scores.json` lacks any of its ids. All problems are reported in one `ValueError`.
 
 ### Design decisions
@@ -1172,4 +1172,58 @@ No API calls and no Docker:
 - **`shard_ids`** on `all_500` and `heldout_360` for 2 to 5 shards: the counts above, every id exactly once, and the refusals for 0 shards, a missing environment and more shards than groups. `shard_instances.py` on a copy of `all_500.txt` with 2 shards wrote two files of 250 ids plus their headers.
 - **`merge_scores.py`** on two shard folders made by splitting the baseline run `2026-10-29T09-34-15` into halves of 250: 344 resolved, 154 unresolved, 1 empty patch and 1 error, with 500 instances, the same as the run's own `scores.json`.
 - **Refusals through the script:** a second merge to the same path (`FileExistsError`), a missing shard folder (`FileNotFoundError` naming `run.json`), and one shard with a different split, a different config, an id from the other shard and one score removed, which gave one `ValueError` listing all 4 problems and wrote no file.
-- **Not yet covered:** the shard files run through `run_batch.py` and `score_run.py`, with a stubbed agent and harness, and then merged. The test above split one existing run, so it cannot catch a mismatch between what those scripts write for a shard and what `merge_scores.py` reads. Two shards running at the same time on one machine (Docker images, disk, rate limits) are also untested. Only the real shard timing pilot shows that.
+- **Stubbed two-shard run (2026-11-05).** 7 pool ids from 3 groups (django 3.2 ×3, sympy 1.5 ×2, xarray 0.12 ×2), each with a planned outcome: resolved, unresolved, empty patch, agent error, or a test timeout. A scratch wrapper replaced `run_single.run_instance`, the harness subprocess (writing log folders, `report.json` files and the summary as swebench 5.0.2 does), `image_exists` and `remove_image`. Everything else was the real code:
+  - `shard_instances.py` gave 3 django ids and 4 others.
+  - Both shards ran at the same time through `run_batch.py --score-each --remove-images` into separate output folders, and each was scored with `score_run.py`.
+  - A merge with one shard unscored stopped with `FileNotFoundError`, and a merge of one shard alone reported the 4 missing ids. Neither wrote a file.
+  - The full merge gave resolved 3, unresolved 1, empty patch 1, agent error 1, error 1, with every id in its planned status.
+- **Found by the stubbed run:**
+  - Both shards got run id `2026-11-05T09-30-12`. A run id is the folder's start time to the second, so shards started together get the same one, and `run_ids` could not tell them apart. `run_dirs` was added (Step 9h).
+  - Two shards started together in one output folder would collide on that name. `make_run_dir` refuses an existing folder, so the second shard would stop at once. Each shard needs its own `--output-dir`.
+  - The timed-out id was evaluated again after every later instance of its shard, the Step 9f problem. Fixed in Step 9h.
+- **Not yet covered:** two real shards at the same time on one machine (Docker images, disk, rate limits). Only the real shard timing pilot shows that.
+
+## Steps 9h and 9i: Scoring each instance once, and clearer stop messages
+
+**Goal.** Stop `--score-each` from evaluating a timed-out instance again after every later instance (Step 9f, sympy-19040, 30 min each time), which sharded runs would hit too. Then make the stop message show the cause of a Docker error, and fix the empty tally after a resume with nothing to run.
+
+### What was added
+
+- **`scoring.evaluation_states(run_dir, predictions)`** returns `{"unevaluated": [...], "no_report": [...]}`. An id with a patch and no harness log folder (`logs/run_evaluation/<run_id>/<model>/<id>/`) is unevaluated. An id with the folder but no `report.json` was evaluated and failed, for example a test timeout. Ids with an empty or null patch, and ids with a report, are in neither list.
+- **`run_harness(..., instance_ids=None)`.** `None` passes every id in `preds.jsonl` as before, which `score_run.py` relies on. A list passes only those ids. An empty list raises `ValueError`.
+- **`score_new_predictions`** passes only the unevaluated ids, and returns `True` without starting the harness when there are none (an errored instance, an empty patch).
+- **At the start of a resume**, the batch prints how many ids have no report and which ones, since they are left to `score_run.py`.
+- **`merge_scores.py`** writes `run_dirs`, each shard's folder as given, next to `run_ids`.
+- **The stop message** prints each error's type, then every non-empty line of its message indented under it, or "No message" when the message is blank.
+- **The tally** reads "nothing ran" when no instance ran in the session.
+
+### Design decisions
+
+- **The state is read from disk, not kept in memory.** The harness creates an instance's log folder before its tests start, so the folder tells "never evaluated" apart from "evaluated, no report". A list of failed ids kept in memory, the first idea in the roadmap, would be lost at every resume, and a timeout would cost 30 min again in each session.
+- **A failed evaluation waits for `score_run.py`.** That includes a scoring crash or a stop during scoring. Its image may be gone by then, so it is pulled again at the end. This is the cost of never repeating a 30 min timeout during the batch.
+- **An empty `instance_ids` list is refused.** The harness reads an empty `--instance_ids` as every id (`get_dataset_from_preds` checks `if instance_ids:`), so it would quietly do the opposite of what was asked. `None` and `[]` are kept apart on purpose.
+- **The harness summary is partial during a batch.** After a call with `instance_ids`, `<model>.<run_id>.json` covers only those ids. Nothing reads it before `score_run.py`, which rewrites it for every id.
+- **`run_dirs` keeps the path as given.** An absolute path would name one machine.
+- **Every line of an error message is printed, not one chosen line.** The roadmap planned to print the last line. The only real Docker failure (django-15375) has its cause on line 2 (`docker: failed to copy: ... net/http: TLS handshake timeout`), and its first and last lines are noise ("Unable to find image ... locally" and "Run 'docker run --help' for more information"). Picking the `docker:` line would assume Docker's output format from one example. A stop is rare, so a few extra lines cost little.
+
+### Bugs found in review
+
+- **`run_harness`:** none in the logic. The empty-list check compares with `[]`, so `None` is not caught by it.
+- **`evaluation_states`:** no `return`, prediction dicts were appended instead of ids (a dict in `argv` makes `subprocess.run` raise `TypeError`), and dead lines after the loop rebuilt a path for the last id.
+- **The resume message:** the key was first `"unresolved"`, a scoring status, then the misspelled `"unevalauted"`. Both raised `KeyError` and would have stopped every resume before it ran anything.
+- **`run_dirs`:** the `Path` was stored without `str()`. `json.dump` raised `TypeError` partway through writing, which left a half-written `merged.json` that mode `"x"` would then refuse to replace.
+- **The stop message:** the "No message" check first ran once per line, so a blank line inside a message printed "No message" and an empty message printed nothing at all. The type was repeated on every line.
+- **The empty tally:** `run_tally is None` is never true, since `run_tally` is always a `Counter`. An empty `Counter` is what had to be detected.
+- **Not changed:** "Next command" and "Next Command" (a 9i item) were already the same by the time 9i started.
+
+### Verification
+
+No API calls and no Docker. The stubbed two-shard setup of Step 12a was used throughout:
+
+- **`run_harness`** with a fake subprocess: no argument passed all 4 ids of a shard, a one-id list passed that id, and `[]` raised `ValueError`.
+- **`evaluation_states`** on the stubbed shards: shard 2 gave `no_report: ['pydata__xarray-2905']` and nothing unevaluated, the same folder with one log folder removed also listed that id as unevaluated, and shard 1 (an agent error and two reports) gave two empty lists.
+- **Shard 2 run again with the fix:** the timed-out id was evaluated once during the batch instead of 4 times, the empty-patch instance started no harness, and `score_run.py` evaluated it once more at the end, by design. A harness exiting with code 1 still printed the warning and counted a scoring failure.
+- **Resume of shard 2:** `1 Unreported ids are left to score_run.py: ['pydata__xarray-2905']` and `Tally: nothing ran`. A resume with no timeout printed no extra line.
+- **The merge** wrote both shard folders in `run_dirs`, so the two shards are told apart although their run ids are the same.
+- **A 3-error stop** with the real django-15375 message, an empty message and a one-line message: each type once, the Docker message as 4 indented lines including the `docker:` cause, "No message" for the empty one, and exit code 1.
+- **After the TODOs were stripped**, the whole stubbed sequence was run once more with the same results.

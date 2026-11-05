@@ -9,12 +9,11 @@ Working rules for every step: the code is written from skeletons with numbered T
 - **Stage 9 baseline:** 344 of 500 resolved (68.8%, 95% interval 64.6% to 72.7%). On the held-out 360 it is 249 (69.2%). Run `2026-10-29T09-34-15`, details in `progression.md` Steps 9f and 9g.
 - **Data split (Step 9a):** `instances/heldout_360_seed1001.txt` is the comparison set and is not read or tuned on until Stage 12. `instances/pool_140_seed1001.txt` (which includes dev_25) is the only data that Stage 10 design and Stage 11 tuning may look at.
 - **Measured costs:** about $0.010 and 124 s per instance (89 s of it agent time) on the Mac, sequential, with `--score-each --remove-images`.
-- **Started early:** Step 12a (sharding). `shard_instances.py` and `merge_scores.py` are done and checked on toy inputs and on the baseline run split in two (`progression.md` Step 12a). The stubbed two-shard run is next.
+- **Started early:** Step 12a (sharding). `shard_instances.py` and `merge_scores.py` are done, and a stubbed two-shard run passed (`progression.md` Step 12a). Only the real shard timing pilot is left.
+- **Steps 9h and 9i are done:** `--score-each` evaluates each instance once, and a stop prints the full error messages (`progression.md` Steps 9h and 9i).
 
 ## Stage 9: what remains
 
-- **9h. Scoring timeout fix (before Stage 12).** A prediction whose tests time out gets no `report.json`, so `--score-each` evaluates it again after every later instance, 30 min each time (sympy-19040, Step 9f). Sharded runs hit the same problem. Likely fix: within a session, skip ids whose scoring has already failed, and leave them to `score_run.py`. Check with a stubbed harness that fails one id.
-- **9i. Small fixes (optional).** In the stop message, print the last line of a Docker error, which holds the cause, instead of the first ("Unable to find image ... locally"). Make "Next command" and "Next Command" the same.
 - **9j. Write the Stage 12 analysis rules into `progression.md`** before any arm results exist (the rules are below). They are fixed in advance so they cannot be adjusted after seeing results.
 
 ## Stage 10: Narration fix (arm 2)
@@ -45,8 +44,8 @@ The Step 6b problem is still open: a first reply often narrates a whole session 
 
 ## Stage 12: Three-arm comparison on the held-out 360
 
-- **12a. Sharding (scripts done, two checks left).** `shard_instances.py` splits an ids file into shards of whole (repo, version) groups, each shard runs as its own `run_batch.py` process into its own folder, and `merge_scores.py` merges the scores with checks.
-  - **Stubbed two-shard run (next, no API, no Docker).** Shard about 6 pool ids into 2, run each shard file through `run_batch.py` with `Agent.run` and `DockerEnvironment.start` stubbed, score each folder with `score_run.py` with the harness stubbed, then merge against the original ids file. The merged summary must match the stubbed results. Then leave one shard partly scored and check that the merge refuses it.
+- **12a. Sharding (scripts done, one check left).** `shard_instances.py` splits an ids file into shards of whole (repo, version) groups, each shard runs as its own `run_batch.py` process into its own folder, and `merge_scores.py` merges the scores with checks.
+  - Give each shard its own `--output-dir`. Shards started in the same second get the same run folder name (`progression.md` Step 12a).
   - **Real shard timing pilot.** Needs its own go-ahead and must not overlap another batch. It is the only check of two shards running at the same time (Docker images, disk, rate limits).
 - **12b. The runs.** Baseline, arm 2 and arm 3, one run each on all 360, plus one repeat baseline run to measure run-to-run noise on this set. Arms are interleaved or run in parallel so time-of-day and API drift affect all of them.
 - **12c. Analysis rules (fixed in advance, see 9j):**
