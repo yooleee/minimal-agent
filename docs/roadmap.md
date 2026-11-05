@@ -10,11 +10,8 @@ Working rules for every step: the code is written from skeletons with numbered T
 - **Data split (Step 9a):** `instances/heldout_360_seed1001.txt` is the comparison set and is not read or tuned on until Stage 12. `instances/pool_140_seed1001.txt` (which includes dev_25) is the only data that Stage 10 design and Stage 11 tuning may look at.
 - **Measured costs:** about $0.010 and 124 s per instance (89 s of it agent time) on the Mac, sequential, with `--score-each --remove-images`.
 - **Started early:** Step 12a (sharding). `shard_instances.py` and `merge_scores.py` are done, and a stubbed two-shard run passed (`progression.md` Step 12a). Only the real shard timing pilot is left.
-- **Steps 9h and 9i are done:** `--score-each` evaluates each instance once, and a stop prints the full error messages (`progression.md` Steps 9h and 9i).
-
-## Stage 9: what remains
-
-- **9j. Write the Stage 12 analysis rules into `progression.md`** before any arm results exist (the rules are below). They are fixed in advance so they cannot be adjusted after seeing results.
+- **Stage 9 is complete.** Steps 9h and 9i made `--score-each` evaluate each instance once and a stop print the full error messages (`progression.md` Steps 9h and 9i).
+- **Also started early:** Step 12b, the analysis rules, is written (`progression.md` Step 12b). Next is Stage 10a.
 
 ## Stage 10: Narration fix (arm 2)
 
@@ -47,13 +44,8 @@ The Step 6b problem is still open: a first reply often narrates a whole session 
 - **12a. Sharding (scripts done, one check left).** `shard_instances.py` splits an ids file into shards of whole (repo, version) groups, each shard runs as its own `run_batch.py` process into its own folder, and `merge_scores.py` merges the scores with checks.
   - Give each shard its own `--output-dir`. Shards started in the same second get the same run folder name (`progression.md` Step 12a).
   - **Real shard timing pilot.** Needs its own go-ahead and must not overlap another batch. It is the only check of two shards running at the same time (Docker images, disk, rate limits).
-- **12b. The runs.** Baseline, arm 2 and arm 3, one run each on all 360, plus one repeat baseline run to measure run-to-run noise on this set. Arms are interleaved or run in parallel so time-of-day and API drift affect all of them.
-- **12c. Analysis rules (fixed in advance, see 9j):**
-  - Primary metric: resolved rate, analysed per instance in pairs, with an exact McNemar test and a paired bootstrap interval on the difference.
-  - With about 16% of instances flipping between identical runs, one run per arm detects about a 6 point difference.
-  - If a difference falls between 3 and 6 points, do a second run of the arms involved. Otherwise report it as it is.
-  - Secondary: empty patches, the narration measure, regressions, cost and steps.
-  - Check the analysis script first on Stage 8 dev data, where the answer is known (no difference between 8d and 8e).
+- **12b. Analysis rules (done, written early).** Fixed in `progression.md` Step 12b before any arm results: the comparisons, the outcome, the exact McNemar test and paired bootstrap interval, the second-run rule and the secondary outcomes. A change must be made before the Stage 12 runs start and recorded there with its date and reason. The analysis script is checked on Stage 8 data first.
+- **12c. The runs.** Baseline, arm 2 and arm 3, one run each on all 360, plus one repeat baseline run to measure run-to-run noise on this set. Arms are interleaved or run in parallel so time-of-day and API drift affect all of them. Analysed by the rules of 12b.
 - **Spend and time:** about 4 × $3.60 ≈ $14.50 (ceiling about $115), and about 4 × 360 × 124 s ≈ 50 h of machine time sequential, so less with shards. Each run needs a go-ahead.
 
 ## Spend still ahead (each needs a go-ahead)
@@ -64,4 +56,4 @@ The Step 6b problem is still open: a first reply often narrates a whole session 
 | 11c | GEPA smoke run | $0.30 | $2 |
 | 11d | GEPA run | $3.50 + up to $10 reflection | $34 |
 | 12a | shard timing pilot | under $1 | to set at the time |
-| 12b | 4 runs on 360 | $14.50 | $115 |
+| 12c | 4 runs on 360 | $14.50 | $115 |

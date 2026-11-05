@@ -1227,3 +1227,68 @@ No API calls and no Docker. The stubbed two-shard setup of Step 12a was used thr
 - **The merge** wrote both shard folders in `run_dirs`, so the two shards are told apart although their run ids are the same.
 - **A 3-error stop** with the real django-15375 message, an empty message and a one-line message: each type once, the Docker message as 4 indented lines including the `docker:` cause, "No message" for the empty one, and exit code 1.
 - **After the TODOs were stripped**, the whole stubbed sequence was run once more with the same results.
+
+## Step 12b: Analysis rules for the Stage 12 comparison (fixed before any arm results)
+
+**Goal.** Fix how the Stage 12 runs will be compared before arm 2 or arm 3 has any result, so the analysis cannot be chosen after seeing the numbers. Written on 2026-11-05, before Step 10c produces the first arm 2 results. A later change to these rules must be made before the Stage 12 runs start, and is recorded in this entry with its date and reason.
+
+### The runs
+
+- **Four runs on `instances/heldout_360_seed1001.txt`:** baseline A, baseline B, arm 2 and arm 3. Each uses its frozen config, the same model, swebench 5.0.2 and the same code commit. They are started together or interleaved (Step 12c) and sharded the same way.
+- **Baseline A is the comparison baseline.** It is named in this file before the runs start. Baseline B only measures run-to-run noise on the held-out set.
+- **The Stage 9 run is not used in any comparison.** Its held-out part (249 of 360) was run weeks earlier, so API or model drift could look like an effect. It is reported next to the results as a third baseline figure.
+
+### The outcome
+
+- **Per instance, 1 if `scores.json` says `resolved`, otherwise 0.** `unresolved`, `empty_patch`, `capture_failed` and `error` all count as 0.
+- **A run is complete before it is analysed.** Every id must have a prediction with no `agent_error`, and the merged scores must cover all 360 ids (`merge_scores.py` checks coverage). An `agent_error` is an API or Docker failure, not the arm's behaviour, so it is rerun with `--resume` and never counted.
+- **A harness `error` counts as 0.** A test timeout can be caused by the patch (sympy-19040 in Step 9f), so it is the arm's result. Each run's `error` count is reported.
+
+### The comparisons
+
+- **Primary:**
+  - arm 2 against baseline A (the narration fix of Stage 10)
+  - arm 3 against arm 2 (GEPA alone, since arm 3 is arm 2 plus the GEPA templates)
+- **Secondary:**
+  - arm 3 against baseline A (both changes together)
+  - baseline B against baseline A, a check that should show no difference
+- **No correction for the two primary tests.** They answer two separate questions, and each is reported as its own claim. This is stated wherever both are reported.
+
+### The test and the interval
+
+- **Exact McNemar test, two-sided, at α = 0.05.** b is the number of instances only the first run resolved, and c the number only the second run resolved. The p value is the exact two-sided binomial probability of a split at least as uneven as b against c with p = 0.5.
+- **Paired bootstrap 95% interval on the difference in resolved rate.** Resample the 360 ids with replacement 10,000 times, with seed 12, and take the 2.5th and 97.5th percentiles of the difference.
+- **Reported for every comparison:** both resolved rates, the difference in points, b, c, the p value and the interval.
+
+### What one run per arm can detect
+
+- **Between the four Step 8d baseline runs, 14.7% of instances flipped on average** (6 pairs, range 8% to 24%, 25 instances each). With n = 360, an exact McNemar test at α = 0.05 has about 80% power for a 5.7 point difference (5.1 points if the flip rate is 12%, 6.6 if it is 20%).
+- **A smaller real difference can be missed.** A non-significant result means "not detected at this size", not "no effect".
+
+### The second-run rule
+
+- **If the difference in a primary comparison is at least 3 and under 6 points**, in either direction, both arms of that comparison get one more run on all 360, under the same conditions.
+- **The final result of that comparison then uses both runs per arm.** Each instance scores 0, 0.5 or 1 per arm. The difference in mean score gets a paired bootstrap 95% interval as above, and the comparison counts as a difference only if that interval excludes 0. The McNemar result of each pair of runs is reported too.
+- **Otherwise the single run is reported as it is**, whatever the p value. There are no further runs.
+- **At most one second run per comparison.** A comparison that did not trigger the rule keeps using the first runs, even if one of its arms got a second run for the other comparison.
+- **This two-stage rule raises the false positive rate somewhat above 5%.** That is accepted and stated with the results.
+
+### Secondary outcomes (described, not tested)
+
+- Empty patches per run.
+- The narration measure (defined in Step 10a).
+- Regressions: runs with any failing PASS_TO_PASS test.
+- Cost per instance, and steps per instance (mean and median).
+- Resolved rate per repo, labelled exploratory.
+- The flip rate between baseline A and B, compared with Step 8d's 14.7%.
+
+### Checks before the analysis script is used
+
+- **Stage 8 data, where the answer is known.** The 8d against 8e pairs must give b = 3, c = 1 (p = 0.625) for `18-03-42` against `18-03-48`, and b = 1, c = 1 (p = 1.0) for `18-43-12` against `18-43-18`. The 6 pairs of 8d baseline runs must give 2 to 6 discordant instances, with a mean flip rate of 14.7%.
+- **A made-up case** with a known difference, to check the sign of the difference and the bootstrap interval.
+
+### Not allowed after results exist
+
+- Changing the instance set, the outcome, the comparisons, α, the test or the second-run thresholds.
+- Rerunning an arm, except under the second-run rule or to clear `agent_error`s.
+- Presenting a per-repo or other subgroup result as a finding.
