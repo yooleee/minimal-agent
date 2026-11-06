@@ -11,19 +11,22 @@ Working rules for every step: the code is written from skeletons with numbered T
 - **Measured costs:** about $0.010 and 124 s per instance (89 s of it agent time) on the Mac, sequential, with `--score-each --remove-images`.
 - **Started early:** Step 12a (sharding). `shard_instances.py` and `merge_scores.py` are done, and a stubbed two-shard run passed (`progression.md` Step 12a). Only the real shard timing pilot is left.
 - **Stage 9 is complete.** Steps 9h and 9i made `--score-each` evaluate each instance once and a stop print the full error messages (`progression.md` Steps 9h and 9i).
-- **Also started early:** Step 12b, the analysis rules, is written (`progression.md` Step 12b). Next is Stage 10a.
+- **Also started early:** Step 12b, the analysis rules, is written (`progression.md` Step 12b).
+- **Stage 10a is done** (`progression.md` Step 10a). Next is Step 10b.
 
 ## Stage 10: Narration fix (arm 2)
 
 The Step 6b problem is still open: a first reply often narrates a whole session in several bash blocks, the format check rejects the reply, and a run whose edits were all in rejected replies can submit an empty patch (django-11333 in Step 8e).
 
-- **10a. A narration measure, no API.** A script over trajectories that counts, per run: replies with other than one block, format errors, `PrematureExit`, steps lost to rejections, and empty patches where a rejected reply contained an edit. Run it on dev_25's six runs and on the pool part of the Stage 9 run. It sets the primary metric for arm 2 before any change. Check it against hand counts on two known trajectories, including django-11333 in `2026-10-27T18-03-48`.
+- **10a. A narration measure (done).** `narration_measure.py`, with results in `progression.md` Step 10a. About 19.5% of steps are lost to rejections. `lost_share` is arm 2's primary metric, as a check of the mechanism.
 - **10b. The fix (decided).** Two changes that act as one intervention:
   - Run the first block of a multi-block reply and tell the model the rest were dropped, instead of rejecting the reply.
   - Reject `exit` while `git diff` against `start_commit` is empty. Every Verified instance needs a change, so an empty submission is always a failure.
 
   Not now: accepting repeated identical blocks, and native tool calling (the next step if arm 2 fails).
-- **10c. Check on dev_25.** Two arm 2 runs against two fresh baseline runs, as in Step 8e. Primary: the narration measure and empty patches. Secondary: the resolved rate, not expected to move at this size. About $1 (ceiling $8). Then freeze the arm 2 config.
+
+  `narration_measure.py` changes with it: add the new rejection's prefix to `classify_response`, and extend `rejected_edit` to blocks dropped from a multi-block reply.
+- **10c. Check on dev_25.** Two arm 2 runs against two fresh baseline runs, as in Step 8e. Primary: `lost_share`, expected to fall from about 20% to about 5.8% by construction, so a drop to that level shows the mechanism works and not that the agent improved. Read it with `not_one_block` and empty patches, and watch runs whose edit was not in the first block (Step 10a). Secondary: the resolved rate, not expected to move at this size. About $1 (ceiling $8). Then freeze the arm 2 config.
 
 ## Stage 11: GEPA (arm 3)
 

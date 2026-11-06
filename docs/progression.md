@@ -810,7 +810,7 @@ The two changes are treated as one intervention, because the exit rule is useles
 
 ### A new failure mode
 
-In the first variant run, django-11333 submitted an empty patch. Its edits were in two replies with 12 and 4 bash blocks, which the format check rejected, so no edit ever ran. It then ran `tests/runtests.py urlpatterns_reverse`, which passed on the unchanged code, ran a verification script, and exited. The new rule was met by an unchanged repository, and the `PrematureExit` guard did not apply because commands had run. This is the Step 6b narration problem.
+In the first variant run, django-11333 submitted an empty patch. Its one edit was in a reply with 12 bash blocks, which the format check rejected, so no edit ever ran. A later reply with 4 blocks was rejected too. It held no edit (corrected in Step 10a). It then ran `tests/runtests.py urlpatterns_reverse`, which passed on the unchanged code, ran a verification script, and exited. The new rule was met by an unchanged repository, and the `PrematureExit` guard did not apply because commands had run. This is the Step 6b narration problem.
 
 ### Open items
 
@@ -1292,3 +1292,84 @@ No API calls and no Docker. The stubbed two-shard setup of Step 12a was used thr
 - Changing the instance set, the outcome, the comparisons, α, the test or the second-run thresholds.
 - Rerunning an arm, except under the second-run rule or to clear `agent_error`s.
 - Presenting a per-repo or other subgroup result as a finding.
+
+## Step 10a: A narration measure
+
+**Goal.** Measure how much of a run the narration problem (Step 6b) costs, from saved trajectories, before any fix exists, so arm 2's primary metric is set first.
+
+### What was added
+
+- **`narration_measure.py <run_dir>... --instances-file <ids file>`** prints one line per run and lists any instance to check by hand. `--output` writes the results as JSON with mode `"x"`.
+- **`classify_response`** names what happened to a reply from the message that answered it: `format_error`, `premature_exit` or `accepted`. An unknown message raises `ValueError`.
+- **`measure_trajectory`** counts one trajectory: replies with other than one block (zero and multi separately), format errors, premature exits, `rejected`, and three flags, `rejected_edit`, `empty_patch` and `empty_with_rejected_edit`.
+- **`measure_run`** adds up the requested ids of one run, keeps each instance's result, and computes `lost_share`, rejected replies divided by steps.
+- **`ACTION_PATTERN`** in `class_agent.py` holds the `bash-action` regex, used by both `parse_action` and the measure.
+- **`EDIT_PATTERN`** is a heuristic for "this block changes a file".
+
+### Design decisions
+
+- **Blocks and rejections are counted separately.** Blocks come from the reply text, and rejections from the answering message. Today they match, because every reply with other than one block is rejected. Step 10b breaks that on purpose, and `not_one_block` then shows whether the model itself changed.
+- **An unknown answering message raises.** Step 10b adds a new rejection, and counting an unknown message as accepted would undercount rejections with nothing to show it. `classify_response` gets its prefix then.
+- **Held-out ids are refused unless `--allow-heldout` is given.** The ids are compared with the held-out file before any trajectory opens, and `measure_run` opens only the requested ids, never a glob of the folder.
+- **A missing trajectory raises**, because a total over fewer instances would look complete.
+- **A crashed run is never an empty patch.** Its `model_patch` is partial or missing for another reason.
+- **Each empty patch with a rejected edit is read by hand.** `EDIT_PATTERN` can miss an unusual edit and can count a scratch file, so `runs_with_rejected_edit` is an estimate.
+
+### The primary metric for arm 2
+
+**`lost_share` is the primary metric, as a check of the mechanism.** It answers "did the fix do what it was designed to do?", not "is the agent better?". The resolved rate answers that second question, in Stage 12 (Step 12b).
+
+`lost_share` falls partly by construction, because Step 10b stops rejecting multi-block replies. With the model behaving as before, only zero-block replies and premature exits would still be rejected:
+
+| Data | Rejected now | Multi-block | Left after 10b | Steps | `lost_share` now | Expected after 10b |
+|---|---|---|---|---|---|---|
+| dev_25, 4 baseline runs | 178 | 126 | 52 | 898 | 19.8% | 5.8% |
+| Stage 9, pool 140 | 259 | 182 | 77 | 1331 | 19.5% | 5.8% |
+
+The expected value assumes the same number of steps, so it is approximate. Well above 5.8% means the fix is not working as intended. Well below it means the model changed too. A drop to about 5.8% is therefore not evidence of a better agent.
+
+`not_one_block` is read next to it, and no real change is expected, since the fix does not discourage multi-block replies. Step 10b must extend `rejected_edit` to blocks dropped from a multi-block reply, or the measure would miss the case that matters most: an edit that never ran in a reply that was not rejected.
+
+### Results
+
+No API calls and no Docker:
+
+| Run | Steps | Format errors | Premature exits | Instances with a rejected edit | Empty patches | `lost_share` |
+|---|---|---|---|---|---|---|
+| `2026-10-27T06-04-48` | 245 | 42 | 7 | 13 | 0 | 20.0% |
+| `2026-10-27T09-09-31` | 208 | 39 | 6 | 13 | 0 | 21.6% |
+| `2026-10-27T18-03-42` | 235 | 40 | 3 | 13 | 0 | 18.3% |
+| `2026-10-27T18-43-12` | 210 | 36 | 5 | 15 | 0 | 19.5% |
+| `2026-10-27T18-03-48` (Step 8e variant) | 302 | 56 | 3 | 18 | 1 | 19.5% |
+| `2026-10-27T18-43-18` (Step 8e variant) | 249 | 46 | 6 | 15 | 0 | 20.9% |
+| `2026-10-29T09-34-15`, pool 140 | 1331 | 231 | 28 | 73 | 0 | 19.5% |
+
+- **About 1 paid step in 5 is lost to rejections**, from 18.3% to 21.6% across the dev runs. In the pool, 135 of 140 instances had at least one rejected reply.
+- **The cost is lost steps, not empty submissions.** The pool has no empty patches, and the one empty patch in the dev runs is django-11333, which had a rejected edit.
+- **An exit is often narrated at the end of a multi-block reply.** In the pool, 45 of 182 multi-block replies have an `exit` block, 43 of them as the last block, and none as the first. Rejecting the reply stops that exit today. Under Step 10b it is dropped with the other blocks, so a narrated `exit` still does not end the run.
+- **The first block is not always the useful one.** django-11333's edit was block 5 of 12, so running only the first block would not have applied it. Step 10c should watch this case. How often it happens was not measured.
+
+### Bugs found in review
+
+- **`classify_response`:** `raise` lines left after each `return` could never run.
+- **`measure_trajectory`:**
+  - `re.findall` was first given the literal text `"not_one_block"` and so on, which replaced the counters with lists.
+  - With no role check, the system prompt and every user message were counted, so `not_one_block` was 12 on a trajectory with 2.
+  - An `elif` after `len(blocks) != 1` made `zero_blocks` and `multi_blocks` unreachable.
+  - The next message was read as `message[index + 1]`, an index into one message's dict (`KeyError`), and the bounds check first compared with the length of a message's text (`IndexError` on a crashed run).
+- **`empty_patch`:** `trajectory["patch"]` for `"model_patch"` (`KeyError`). Without brackets, `a or b and c` applied the `"Error"` check only to `None`, so an empty diff from a crashed run counted as an empty patch.
+- **`measure_run`:**
+  - `json.load` was given `encoding=`, which it does not accept.
+  - A filter on `isinstance(value, int)` would have included booleans (`bool` is a subclass of `int`) and added every field into one number.
+  - Field names in the returned dict did not match the docstring, `rejected` held the number of runs and not the total, and `runs_with_rejection` was not returned.
+- **The held-out check:** `set(f.read())` built a set of single characters, so the overlap was always 0, and `overlap_count is not None` was always true. Together they refused every file with a count of 0. Fixing only the second would have let every file through.
+- **`EDIT_PATTERN` (from the skeleton):** the `>` branch matched Python in heredocs, such as `-> None` and `> 200`, and no real redirect in the pool's rejected replies. Every instance it matched was also caught by `write_text(`, so no count changed. It now needs a filename with an extension. One false match remains in the pool (`> before.currsize`).
+
+### Verification
+
+- **Hand counts** by counting fences in each reply as text and reading each answering message, without the script's regex, on two trajectories: django-11333 in `2026-10-27T18-03-48` (9 steps, 2 multi-block, 2 format errors) and pytest-6197 in the pool (15 steps, 1 multi-block, 1 zero-block, 2 format errors, 1 premature exit). Both match the script exactly.
+- **Case checks:** every known answering message, an unknown one, all six combinations of patch and exit status, and a crashed run whose last reply has no answer.
+- **The held-out guard** on the full Stage 9 folder: dev and pool run, and `all_500.txt` and the held-out file are refused with 360 overlapping ids before any trajectory opens.
+- **`--output`:** two runs in one file, in a new folder, and a second write to the same path refused.
+- **`parse_action`** still returns a single block after moving its regex to `ACTION_PATTERN`.
+- **Limits:** in 2 of the pool's 73 instances with a rejected edit, the write looks like a `/tmp` scratch file, so that count is slightly high. One survey during this step opened held-out trajectories by mistake. It printed only combined counts of rejection message types, and no held-out content was read.

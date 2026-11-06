@@ -37,6 +37,10 @@ from handling.exceptions import (
 
 load_dotenv()
 
+# Regex for the bash commands used by the agent. Read by both parse_action
+# and narration_measure.
+
+ACTION_PATTERN = r"```bash-action\s*\n(.*?)\n```"
 
 class Agent:
     def __init__(
@@ -109,7 +113,7 @@ class Agent:
     def parse_action(self, lm_output: str) -> str:
         """Takes the LM output, returns the action"""
 
-        matches = re.findall(r"```bash-action\s*\n(.*?)\n```", lm_output, re.DOTALL)
+        matches = re.findall(ACTION_PATTERN, lm_output, re.DOTALL)
 
         if len(matches) == 1:
             return matches[0].strip()
