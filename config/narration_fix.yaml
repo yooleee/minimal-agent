@@ -1,0 +1,77 @@
+# =============================================================================
+# narration_fix.yaml
+# -----------------------------------------------------------------------------
+# Responsible for: Arm 2 (Stage 10). Identical to default.yaml except for
+#                  narration_fix: true under agent, which runs the first block
+#                  of a multi-block reply and refuses an exit with no change.
+#                  The prompts are the same. Use with --config. Keep every
+#                  other line in sync with default.yaml, so the two arms differ
+#                  only in the behaviour being tested.
+# Role in project: Loaded once by run_single.load_config() (override with
+#                  --config). The values are passed down as plain arguments, so
+#                  Agent and DockerEnvironment never read this file themselves.
+# Assumptions:     Keys under `agent` and `environment` match the parameter names
+#                  of Agent and DockerEnvironment exactly, because they are
+#                  unpacked with **. An unknown key fails with "unexpected
+#                  keyword argument" before any LM call.
+#                  Templates are filled with str.format: {timeout} comes from
+#                  environment.timeout, {output_limit:,}, {head_chars:,} and
+#                  {tail_chars:,} from agent, {repo} and {problem_statement}
+#                  from the dataset row. A literal brace must be doubled ({{ }}).
+#                  Never put # comments inside a | block: they become prompt text.
+# =============================================================================
+
+dataset:
+  name: SWE-bench/SWE-bench_Verified
+  split: test
+
+model:
+  name: gpt-5.6-luna
+
+agent:
+  max_steps: 50
+  max_format_errors: 5
+  output_limit: 10000
+  head_chars: 5000
+  tail_chars: 5000
+  narration_fix: true
+
+system_template: |
+    You are a helpful assistant that completes tasks by running bash commands.
+
+    In each reply:
+    1. In one or two sentences, say what you learned from the last output and what this command is for.
+    2. Then include exactly one bash-action block on its own lines with the command(s) to run:
+
+    ```bash-action
+    <command>
+    ```
+
+    Rules:
+    - Use exactly one bash-action block per reply. You can chain commands inside it with && or ;, or use pipes.
+    - Put the block on its own lines; end your reply immmediately after the block.
+    - Each block runs in a new shell, so directory changes and environment variables do not persist between replies. Chain them where needed, e.g. cd dir && ls.
+    - Commands time out after {timeout} seconds. Avoid interactive commands and anything that runs indefinitely.
+    - You cannot run commands yourself. Only the single block in this reply is executed, and you will see its output in the next message. Never describe results you have not seen.
+    - Command output longer than {output_limit:,} characters is truncated: you will see only the first {head_chars:,} and last {tail_chars:,} characters. For large outputs, redirect to a file (e.g. cmd > out.txt 2>&1) and inspect it in pieces with grep -n, head, tail, or sed -n 'START,ENDp' out.txt.
+    - Reply with a block containing only: exit, and nothing else, only after you have seen command output in this conversation that verifies the fix.
+
+task_template: |
+    Here is an issue from the {repo} repository, which is located at /testbed:
+
+    <issue>
+    {problem_statement}
+    </issue>
+
+    Fix this issue by modifying non-test source files only. Do not modify tests.
+    Recommended workflow: find the relevant code, write a small script that reproduces the issue,
+    make the fix, then re-run the script to verify it. When you are done, exit as described in the rules.
+
+
+environment:
+  cwd: /testbed
+  timeout: 60
+  env:
+    BASH_ENV: /root/.bashrc
+    MANPAGER: cat
+    PAGER: cat

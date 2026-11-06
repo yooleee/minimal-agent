@@ -1373,3 +1373,52 @@ No API calls and no Docker:
 - **`--output`:** two runs in one file, in a new folder, and a second write to the same path refused.
 - **`parse_action`** still returns a single block after moving its regex to `ACTION_PATTERN`.
 - **Limits:** in 2 of the pool's 73 instances with a rejected edit, the write looks like a `/tmp` scratch file, so that count is slightly high. One survey during this step opened held-out trajectories by mistake. It printed only combined counts of rejection message types, and no held-out content was read.
+
+## Step 10b: The narration fix (arm 2)
+
+**Goal.** Build the fix for the narration problem: stop losing a whole step to a multi-block reply, and stop a run from submitting nothing. Built on 2026-11-06 and checked only on scripted replies. How the real model responds is Step 10c.
+
+### What was added
+
+- **`narration_fix`,** an `Agent` argument that defaults to `False`. It turns on both changes below, because the two act as one intervention.
+- **The first block of a multi-block reply runs.** `parse_action` now returns `(action, dropped)`. A reply with no block is still a format error, and a multi-block reply is still one when the flag is off.
+- **The model is told what was dropped.** `DROPPED_BLOCKS_NOTE` is added to the end of the answer, after a timeout message too.
+- **An exit is refused when the repository has no changes.** `EmptyExit` is a new non-terminating exception, sent with `EMPTY_EXIT_MESSAGE`.
+- **`Agent.run(read_patch=...)`** takes a function that returns the current patch. `run_instance` passes `capture_patch` with the start commit. With the flag on, a missing function raises `ValueError`.
+- **`config/narration_fix.yaml`** is arm 2's config. Loaded and compared with `default.yaml`, its only difference is `narration_fix: true` under `agent`. The prompts are the same.
+- **`narration_measure.py`** counts `empty_exits` and includes them in `rejected`. `rejected_edit` now means an edit in a block that did not run, so it also covers blocks dropped from an accepted reply.
+
+### Design decisions
+
+- **`default.yaml` is unchanged and the flag is off by default.** Baseline and arm 2 can run from the same commit, as Step 12b requires, and `--resume` still accepts existing runs.
+- **Only the first block runs.** Later blocks were written before any output was seen, so they are guesses. Running them all would make one step do an unknown amount of work.
+- **The refused-exit check uses `capture_patch`,** so it matches what is submitted. Dependency injection is what makes that possible: `run_single.py` imports `class_agent.py`, so the agent cannot import `capture_patch` back. A test can also pass a stub.
+- **A failed check does not block the exit.** `read_patch` returns `None` when it could not read the patch, and only `""` refuses. "Could not check" is not "nothing changed".
+- **An exit as the first block of a multi-block reply is a normal exit.** It happened in 0 of 182 multi-block replies in the pool, so it has no rule of its own.
+- **No cap on refused exits.** An agent sure that nothing needs changing is refused until the 50-step limit and ends as `StepLimit`. The cost is bounded and the case should be rare, since the pool has no empty patches. Step 10c shows whether refusals repeat.
+- **Both new messages are constants in the code, not in the prompt templates,** so GEPA (Stage 11) does not change them.
+
+### Known limitation
+
+`capture_patch` uses `git add -A`, so a scratch file left in the repository counts as a change. A run with only `reproduce.py` passes the check. That matches what is submitted, but the check only catches a truly empty diff.
+
+### Bugs found in review
+
+- **`step`:** without unpacking `(action, dropped)`, `action` was a tuple and could never equal `"exit"`. `EmptyExit` needs a message dict, not a string, because `run` appends it to the history.
+- **The dropped note:**
+  - A loop over the note's characters with `", ".join` printed `N, o, t, e`, and the placeholders were never filled.
+  - A start value of `" "` added a trailing space to every message, which changed the baseline's text.
+  - The timeout path skipped the note.
+- **`read_patch`:** it was created in `run_single.py` but not passed to `agent.run()`, so every run with the flag on would have raised `ValueError` and been recorded as `Error`.
+- **`empty_exits`** was counted per instance but left out of `rejected` and `SUM_FIELDS`.
+- **The note's wording (from the skeleton):** "The other 1 were dropped".
+
+### Verification
+
+No API calls and no Docker. A scripted model and a fake environment drove the real `Agent`, and then the real `run_instance` with both config files:
+
+- **Flag off:** multi-block replies are rejected as before, `read_patch` is never called, and messages are unchanged.
+- **Flag on:** a 3-block reply runs its first block and carries the note with the right counts, a timeout keeps the note, a narrated `exit` in a later block does not end the run, and a failed check (`None`) lets the exit through. An exit with no earlier command still gets `PrematureExit`.
+- **The same script under both configs:** exit with no edit, then edit, then exit. `default.yaml` submits an empty patch in 2 steps. `narration_fix.yaml` refuses the exit and submits a patch in 4 steps.
+- **`narration_measure.py`:** an edit in a dropped block sets `rejected_edit`, an edit in the first block does not, and refused exits count. The Step 10a numbers are unchanged, for example 59 rejected and 19.5% on `2026-10-27T18-03-48`, and 259 rejected and 19.5% on the pool.
+- **Not covered:** a real model or a real container. The scripted runs show the mechanism, not how the model responds to the note or a refusal.

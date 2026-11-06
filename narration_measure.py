@@ -29,7 +29,7 @@ HELDOUT_FILE = Path("instances/heldout_360_seed1001.txt")
 # mean the reply was rejected and nothing in it ran.
 FORMAT_ERROR_PREFIX = "Found "
 PREMATURE_EXIT_PREFIX = "Nothing has been executed yet"
-
+EMPTY_EXIT_PREFIX = "Exit refused"
 # These mean the reply was acted on.
 ACCEPTED_PREFIXES = ("Exit code:", "Command timed out", "LM requested to quit", "Step limit reached")
 
@@ -48,7 +48,7 @@ EDIT_PATTERN = re.compile(
 # Int fields counted in the trajectory measurement functin. Required again when
 # measuring the run to confirm the results of each instance trajectory.
 SUM_FIELDS = ("steps", "not_one_block", "zero_blocks", "multi_blocks",
-                "format_errors", "premature_exits", "rejected")
+                "format_errors", "premature_exits", "empty_exits", "rejected")
 
 # Run fields counted in the run measurements.
 
@@ -65,7 +65,7 @@ def classify_response(content: str) -> str:
         content: The content of the user message right after a model reply.
 
     Returns:
-        "format_error", "premature_exit" or "accepted".
+        "format_error", "premature_exit", "empty_exit" or "accepted".
 
     Raises:
         ValueError: if the message starts with none of the known prefixes.
@@ -73,15 +73,18 @@ def classify_response(content: str) -> str:
     Why:
         The answering message is what the agent really did, so nothing here
         has to re-derive the agent's rules. An unknown message raises instead
-        of counting as accepted: Step 10b adds a new rejection (an exit with an
-        empty diff), and a silent "accepted" would undercount rejections with
-        nothing to show it. Step 10b adds its prefix here.
+        of counting as accepted, because a silent "accepted" would undercount
+        rejections with nothing to show it. A new rejection in the agent (Step
+        10b added the refused exit) needs its prefix here.
     """
     if content.startswith(FORMAT_ERROR_PREFIX):
         return "format_error"
 
     elif content.startswith(PREMATURE_EXIT_PREFIX):
         return "premature_exit"
+
+    elif content.startswith(EMPTY_EXIT_PREFIX):
+        return "empty_exit"
 
     elif content.startswith(ACCEPTED_PREFIXES):
         return "accepted"
@@ -98,9 +101,10 @@ def measure_trajectory(trajectory: dict) -> dict:
 
     Returns:
         {"steps": int, "not_one_block": int, "zero_blocks": int,
-         "multi_blocks": int, "format_errors": int, "premature_exits": int,
-         "rejected": int (format_errors + premature_exits),
-         "rejected_edit": bool (a rejected reply held a block with an edit),
+         "multi_blocks": int, "format_errors": int,
+         "premature_exits": int, "empty_exits": int,
+         "rejected": int (format_errors + premature_exits + empty_exits),
+         "rejected_edit": bool (a block that did not run held an edit),
          "empty_patch": bool,
          "empty_with_rejected_edit": bool (both of the above)}.
 
@@ -120,6 +124,7 @@ def measure_trajectory(trajectory: dict) -> dict:
     multi_blocks = 0
     format_errors = 0
     premature_exits = 0
+    empty_exits = 0
     rejected_edit = False
 
 
@@ -146,6 +151,14 @@ def measure_trajectory(trajectory: dict) -> dict:
                         if EDIT_PATTERN.search(block):
                             rejected_edit = True
 
+                elif output == "accepted" and len(blocks) >= 2:
+                    for block in blocks[1:]:
+                        if EDIT_PATTERN.search(block):
+                            rejected_edit = True
+
+                elif output == "empty_exit":
+                    empty_exits += 1
+
                 elif output == "premature_exit":
                     premature_exits += 1
 
@@ -159,7 +172,7 @@ def measure_trajectory(trajectory: dict) -> dict:
         "steps": steps, "not_one_block": not_one_block,
         "zero_blocks": zero_blocks, "multi_blocks": multi_blocks,
         "format_errors": format_errors, "premature_exits": premature_exits,
-        "rejected": format_errors + premature_exits,
+        "empty_exits": empty_exits, "rejected": format_errors + premature_exits + empty_exits,
         "rejected_edit": rejected_edit, "empty_patch": empty_patch,
         "empty_with_rejected_edit": empty_patch and rejected_edit
     }
@@ -175,7 +188,7 @@ def measure_run(run_dir: Path, instance_ids: list[str]) -> dict:
     Returns:
         {"run_dir": str, "n": int, "steps": int, "not_one_block": int,
          "zero_blocks": int, "multi_blocks": int, "format_errors": int,
-         "premature_exits": int, "rejected": int,
+         "premature_exits": int, "empty_exits": int, "rejected": int,
          "runs_with_rejection": int, "runs_with_rejected_edit": int,
          "empty_patches": int, "empty_with_rejected_edit": int,
          "lost_share": float (rejected / steps), "instances":

@@ -262,7 +262,8 @@ def run_instance(instance_id: str, config: dict) -> dict:
         env.start()
         started = True
         start_commit = read_start_commit(env)
-        exit_status = agent.run()
+        read_patch = lambda: capture_patch(env, start_commit)
+        exit_status = agent.run(read_patch=read_patch)
         model_patch = capture_patch(env, start_commit)
 
     # Exception, not BaseException: Ctrl-C (KeyboardInterrupt) still stops the run.

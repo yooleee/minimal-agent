@@ -26,6 +26,7 @@ from openai import OpenAI
 
 from config.environments import Environment
 from handling.exceptions import (
+    EmptyExit,
     ExecutionTimeout,
     FormatError,
     NonTerminatingException,
@@ -42,11 +43,26 @@ load_dotenv()
 
 ACTION_PATTERN = r"```bash-action\s*\n(.*?)\n```"
 
+# Stage 10b (narration_fix). Added after the command's output, so the message
+# still starts with "Exit code:" or "Command timed out".
+DROPPED_BLOCKS_NOTE = (
+    "\n\nNote: your reply had {total} bash-action blocks. Only the first one ran. "
+    "Blocks dropped without running: {dropped}. "
+    "Send one block per reply, and base the next one on the output above."
+)
+
+# Starts with the prefix narration_measure.py uses to count this rejection.
+EMPTY_EXIT_MESSAGE = (
+    "Exit refused: the repository has no changes, so there is nothing to submit. "
+    "Any edit in an earlier reply that was rejected or dropped did not run. "
+    "Make the change, verify it, then exit."
+)
+
 class Agent:
     def __init__(
         self, messages: list[dict], env: Environment, model: str = "gpt-5.6-luna",
         max_steps: int = 50, max_format_errors: int = 5, output_limit: int = 10000,
-        head_chars: int = 5000, tail_chars: int = 5000
+        head_chars: int = 5000, tail_chars: int = 5000, narration_fix: bool = False
     ):
         self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         self.model = model
@@ -60,6 +76,8 @@ class Agent:
         self.tail_chars = tail_chars
         self.messages = list(messages)
         self.lm_calls: list[dict] = []
+        self.narration_fix = narration_fix
+        self.read_patch = None
 
         if not self.messages or self.messages[0]["role"] != "system":
             raise ValueError("Messages must start with a system prompt")
@@ -110,13 +128,37 @@ class Agent:
 
         return "\n".join(item["text"] for item in message_items)
 
-    def parse_action(self, lm_output: str) -> str:
-        """Takes the LM output, returns the action"""
+    def parse_action(self, lm_output: str) -> tuple[str, int]:
+        """
+        Take the LM output and return the action to run.
 
+        Args:
+            lm_output: The model's reply.
+
+        Returns:
+            (the action, how many blocks of the reply were dropped). dropped
+            is 0 unless narration_fix is on and the reply had several blocks.
+
+        Raises:
+            FormatError: for a reply with no block, or with several blocks
+                when narration_fix is off.
+
+        Why:
+            A reply that narrates a whole session used to be rejected whole,
+            so a first command that was fine never ran, about 1 step in 5 was
+            lost (Step 10a), and an edit in such a reply could vanish
+            (django-11333). Running the first block keeps the one-command loop:
+            later blocks were written before seeing any output, so they are
+            guesses. An exit at the end of a narrated reply is dropped too, as
+            it was never the first block in the pool (0 of 182).
+        """
         matches = re.findall(ACTION_PATTERN, lm_output, re.DOTALL)
 
         if len(matches) == 1:
-            return matches[0].strip()
+            return matches[0].strip(), 0
+
+        if self.narration_fix and len(matches) >= 2:
+            return matches[0].strip(), len(matches) - 1
 
         raise FormatError(
             {
@@ -179,22 +221,64 @@ class Agent:
         print("LM Output", lm_output)
         self.add_message("assistant", lm_output)
 
-        action = self.parse_action(lm_output)
+        action, dropped = self.parse_action(lm_output)
 
         if action == "exit" and self.commands_run == 0:
             raise PrematureExit({"role": "user", "content": "Nothing has been executed yet, please start with a command"})
 
         print("Action", action)
         if action == "exit":
+            if self.narration_fix and self.read_patch() == "":
+                raise EmptyExit({"role": "user", "content": EMPTY_EXIT_MESSAGE})
+
             raise Submitted({"role": "user", "content": "LM requested to quit"})
 
         self.commands_run += 1
-        action_outcome = self.execute_action(action)
+        dropped_string = ""
+        if dropped > 0:
+            dropped_string = DROPPED_BLOCKS_NOTE.format(total=dropped + 1, dropped=dropped)
+
+        try:
+            action_outcome = self.execute_action(action)
+
+        except ExecutionTimeout as e:
+            e.messages[0]["content"] += dropped_string
+            raise
+
         output = self.format_output(action_outcome)
+        output += dropped_string
         print("Output", output)
         self.add_message("user", output)
 
-    def run(self):
+    def run(self, read_patch=None):
+        """
+        Run steps until a terminating exception or too many format errors.
+
+        Args:
+            read_patch: A function with no arguments returning the current
+                patch ("" if nothing changed, None if it could not be read).
+                Required when narration_fix is on.
+
+        Returns:
+            The exit status, the exception class name such as "Submitted".
+
+        Raises:
+            ValueError: if narration_fix is on and read_patch is None.
+
+        Why:
+            Dependency injection: run_single owns capture_patch and the start
+            commit, and it imports this module, so the Agent cannot import
+            them back. Passing a function keeps the check identical to what is
+            submitted, and a test can pass a stub instead of a container.
+        """
+        if self.narration_fix:
+
+            if read_patch is not None:
+                self.read_patch = read_patch
+
+            else:
+                raise ValueError(f"Narration_fix is on but no read_patch function was given: {read_patch}")
+
         format_errors = 0
 
         while True:

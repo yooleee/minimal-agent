@@ -30,6 +30,10 @@ class PrematureExit(NonTerminatingException):
 
     """ Raised when the agent prematurely exits without running any commands """
 
+class EmptyExit(NonTerminatingException):
+
+    """ Raised when the agent exits with no change made in the repo. """
+
 class StepLimit(TerminatingException):
 
     """ Raised when the # of steps is over the limit terminating the session. """
