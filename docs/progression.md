@@ -1422,3 +1422,44 @@ No API calls and no Docker. A scripted model and a fake environment drove the re
 - **The same script under both configs:** exit with no edit, then edit, then exit. `default.yaml` submits an empty patch in 2 steps. `narration_fix.yaml` refuses the exit and submits a patch in 4 steps.
 - **`narration_measure.py`:** an edit in a dropped block sets `rejected_edit`, an edit in the first block does not, and refused exits count. The Step 10a numbers are unchanged, for example 59 rejected and 19.5% on `2026-10-27T18-03-48`, and 259 rejected and 19.5% on the pool.
 - **Not covered:** a real model or a real container. The scripted runs show the mechanism, not how the model responds to the note or a refusal.
+
+## Step 10c: Arm 2 on the real model
+
+**Goal.** Run the fix on the real model for the first time, against fresh baseline runs, then freeze arm 2.
+
+### Runs
+
+All runs used gpt-5.6-luna on `instances/dev_25_seed1234.txt`, from clean commit `05ffb6d`. As in Step 8e, each arm 2 run started 5 seconds after a baseline run, so both shared the same load. The 25 images were pulled first, so a slow pull could not become an `Error` on a paid run. `--remove-images` was off, because two parallel arms share the images. Scoring came after both pairs. Each pair took about 30 minutes, and each scoring run about 13 minutes.
+
+| Run | Config | Resolved | Steps | `not_one_block` | Format errors | Premature exits | `lost_share` | Cost |
+|---|---|---|---|---|---|---|---|---|
+| `2026-11-06T23-14-04` | baseline | 16 | 248 | 36 | 36 | 7 | 17.3% | $0.26 |
+| `2026-11-06T23-14-09` | arm 2 | 18 | 230 | 44 | 13 | 8 | 9.1% | $0.27 |
+| `2026-11-06T23-43-44` | baseline | 18 | 240 | 39 | 39 | 3 | 17.5% | $0.26 |
+| `2026-11-06T23-43-48` | arm 2 | 18 | 226 | 35 | 6 | 6 | 5.3% | $0.27 |
+
+All 100 instance runs ended `Submitted`, with no `agent_error`, no empty patches and no refused exits. The cost is computed from token counts at the Step 8d prices, about $1.06 in total. The dashboard was not checked.
+
+### Results
+
+- **The mechanism works.** Over both runs, `lost_share` fell from 17.4% (85 of 488 steps) to 7.2% (33 of 456), close to the 5.8% expected in Step 10a. As recorded there, most of this drop follows from the rule change and is not evidence of a better agent.
+- **The model did not change its habit.** `not_one_block` was 75 for the baseline and 79 for arm 2.
+- **The resolved rate did not measurably change:** 34 of 50 (68%) for the baseline and 36 of 50 (72%) for arm 2. Pair 1 had 3 instances resolved by arm 2 only and 1 by the baseline only (exact McNemar p = 0.625). Pair 2 had no flips (p = 1.0). The two baseline runs differ by 2 instances, as much as the arms do. This size cannot show a gain, which was accepted before running. Stage 12 can.
+- **Steps fell slightly,** from 488 to 456, and the cost per run did not fall. Two runs per arm cannot show whether either is real.
+
+### The dropped edits
+
+Step 10b's risk was an edit in a block that gets dropped, as django-11333's was. This turned out to be common: of the 60 multi-block replies that ran, 22 had an edit in a dropped block and 7 had one in the first block. That affected 21 of the 50 arm 2 runs.
+
+The agent recovered. In 19 of the 21 runs, a later single-block reply made an edit that ran. All 21 ended with a patch, and 15 resolved. So the note appears to do its job, and the model redoes the work.
+
+This comes from `EDIT_PATTERN`, not from reading each trajectory, so the counts are approximate. A later edit is not proven to be the same edit. The other 2 runs (sympy-24213 and astropy-7336) submitted a patch and resolved, and they were not read.
+
+### Not shown
+
+- **The refused exit was never used.** There were 0 refusals in 50 arm 2 runs, and no baseline run submitted an empty patch either, so this half of the fix is unmeasured on the real model. How the model responds to a refusal, and whether refusals repeat until the step limit, is unknown.
+- **The dev set is not the held-out set,** and it is 25 instances. Nothing here estimates arm 2's effect on the resolved rate.
+
+### Arm 2 is frozen
+
+`config/narration_fix.yaml` is frozen as of this step. No cap on refused exits was added, since nothing here supports one. Stage 11 starts from this config, and Stage 12 runs it as arm 2. A change would mean repeating this step.

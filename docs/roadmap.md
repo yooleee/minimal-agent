@@ -12,7 +12,7 @@ Working rules for every step: the code is written from skeletons with numbered T
 - **Started early:** Step 12a (sharding). `shard_instances.py` and `merge_scores.py` are done, and a stubbed two-shard run passed (`progression.md` Step 12a). Only the real shard timing pilot is left.
 - **Stage 9 is complete.** Steps 9h and 9i made `--score-each` evaluate each instance once and a stop print the full error messages (`progression.md` Steps 9h and 9i).
 - **Also started early:** Step 12b, the analysis rules, is written (`progression.md` Step 12b).
-- **Steps 10a and 10b are done** (`progression.md`). Next is Step 10c, which needs a go-ahead because it spends API money.
+- **Stage 10 is complete.** Arm 2 is `config/narration_fix.yaml`, frozen at Step 10c (`progression.md` Steps 10a to 10c). Next is Step 11a.
 
 ## Stage 10: Narration fix (arm 2)
 
@@ -20,7 +20,7 @@ The Step 6b problem is still open: a first reply often narrates a whole session 
 
 - **10a. A narration measure (done).** `narration_measure.py`, with results in `progression.md` Step 10a. About 19.5% of steps are lost to rejections. `lost_share` is arm 2's primary metric, as a check of the mechanism.
 - **10b. The fix (done).** `config/narration_fix.yaml` turns on `narration_fix`: the first block of a multi-block reply runs, and an exit with no change is refused (`progression.md` Step 10b). Checked on scripted replies only. Not now: accepting repeated identical blocks, and native tool calling (the next step if arm 2 fails).
-- **10c. Check on dev_25.** Two arm 2 runs against two fresh baseline runs, as in Step 8e. Primary: `lost_share`, expected to fall from about 20% to about 5.8% by construction, so a drop to that level shows the mechanism works and not that the agent improved. Read it with `not_one_block` and empty patches, and watch runs whose edit was not in the first block (Step 10a). Secondary: the resolved rate, not expected to move at this size. About $1 (ceiling $8). Then freeze the arm 2 config.
+- **10c. Check on dev_25 (done).** `lost_share` fell from 17.4% to 7.2%, and resolved was 36 of 50 against 34 of 50, within noise (`progression.md` Step 10c). `config/narration_fix.yaml` is frozen. The refused exit was never used, so it is unmeasured on the real model.
 
 ## Stage 11: GEPA (arm 3)
 
@@ -49,7 +49,6 @@ The Step 6b problem is still open: a first reply often narrates a whole session 
 
 | Step | What | Typical | Ceiling |
 |---|---|---|---|
-| 10c | 4 runs on dev_25 | $1 | $8 |
 | 11c | GEPA smoke run | $0.30 | $2 |
 | 11d | GEPA run | $3.50 + up to $10 reflection | $34 |
 | 12a | shard timing pilot | under $1 | to set at the time |

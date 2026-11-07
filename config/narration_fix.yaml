@@ -7,6 +7,8 @@
 #                  The prompts are the same. Use with --config. Keep every
 #                  other line in sync with default.yaml, so the two arms differ
 #                  only in the behaviour being tested.
+#                  Frozen at Step 10c (2026-11-06): do not change it before
+#                  Stage 12. Stage 11 starts from it.
 # Role in project: Loaded once by run_single.load_config() (override with
 #                  --config). The values are passed down as plain arguments, so
 #                  Agent and DockerEnvironment never read this file themselves.
