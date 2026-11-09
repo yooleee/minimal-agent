@@ -15,7 +15,10 @@ Goal of the project: one SWE-bench (bash-only) instance per evaluation, run unat
 | 6b | Per-call LM record, early-exit guard, prompt fixes | Done |
 | 7 | Scoring with the SWE-bench harness | Done |
 | 8 | Robustness and batch runs, baseline and exit-rule experiment | Done |
-| 9 | Full 500-instance baseline, with a held-out split drawn first | In progress |
+| 9 | Full 500-instance baseline, with a held-out split drawn first | Done |
+| 10 | Narration fix (arm 2), frozen as `config/narration_fix.yaml` | Done |
+| 11 | GEPA prompt optimization (arm 3) | In progress: 11a done, 11b next |
+| 12 | Three-arm comparison on the held-out 360 | Not run: 12a scripts and 12b analysis rules done early |
 
 ---
 
@@ -1463,3 +1466,68 @@ This comes from `EDIT_PATTERN`, not from reading each trajectory, so the counts 
 ### Arm 2 is frozen
 
 `config/narration_fix.yaml` is frozen as of this step. No cap on refused exits was added, since nothing here supports one. Stage 11 starts from this config, and Stage 12 runs it as arm 2. A change would mean repeating this step.
+
+## Step 11a: Confirming the GEPA library
+
+**Goal.** Check that `gepa==0.1.4` matches what the roadmap assumes, that the core runs without litellm, and whether a hand-written loop would do as well, before any Stage 11 code exists. Done on 2026-11-06, with no model spend. The only API call was the free model listing.
+
+### How it was checked
+
+- **The real wheel,** with its sha256 compared to PyPI, ran with stub adapters and a stub reflection function.
+- **Without dependencies:** first from memory with only the standard library on the path, then from a clean `pip install gepa==0.1.4` in a throwaway venv, which installed `gepa` and nothing else.
+- **Resume** ran in that venv with a real `run_dir`, interrupted at seven points and compared with an uninterrupted run.
+- **Pool figures** came from Stage 9 scores and patches, looked up only by the ids in `instances/pool_140_seed1001.txt`. The held-out file was not opened.
+- **The stubs show how the library behaves,** not how GEPA will perform on the real agent. No real prompt was optimized.
+
+### What was confirmed
+
+- **`gepa.optimize` and the adapter interface match.** `evaluate(batch, candidate, capture_traces)` returns an `EvaluationBatch`, and `make_reflective_dataset(candidate, eval_batch, components)` builds the feedback. Plain instance ids work as data items.
+- **litellm is not needed.** It is imported only when `gepa.lm.LM` is called, which happens when `reflection_lm` is a string. A callable avoids it.
+- **`max_metric_calls` counts every rollout,** but it is checked only between iterations. A run can pass the budget by up to 45 rollouts (a minibatch pair plus a full val evaluation). Stubs ended at 303, 305 and 309 with a budget of 300.
+- **`total_num_evals` is restored on resume.**
+- **Ties keep the seed.** With every candidate tied on val, GEPA returned the seed.
+
+### What differs from the roadmap's assumptions
+
+- **`max_reflection_cost` does nothing for a plain callable.** `optimize` wraps it in `TrackingLM`, which always reports $0. A $0.001 cap never fired in 300 rollouts. An object with its own `total_cost` is used directly, and the cap stopped it after one call.
+- **The cost total does not survive a resume.** A new client starts at $0, so each resume would allow the full cap again. The client must save its total to disk.
+- **Each resume re-evaluates the seed on val and discards the result.** That is 40 rollouts outside the budget, about $0.40 and 83 minutes. `cache_evaluation=True` does not help, because that cache lives in the state that loads afterwards.
+- **State is saved only at the start of an iteration,** so a crash loses the iteration in progress. Up to 6 rollouts were lost in the tests, and none of the interrupts fell during a val evaluation. The worst case of 46 is arithmetic.
+- **A resumed run is valid but not reproducible.** Parent selection diverged from the uninterrupted run. Minibatches stayed the same during the first pass through train and differed once a run started a second pass. A resumed run should be recorded as resumed.
+- **A template that still formats can be broken.** `str.format` accepts a template with `{problem_statement}` removed, which would give the agent no issue. `output_extractor` takes the text between the first and last triple backticks of the reply, and our system template contains a `bash-action` block. With no outer fence it returned only `<command>`, and a later fenced example was appended to the template.
+- **The default reflection prompt invites overfitting.** It asks for "niche and domain specific factual information" from the examples.
+- **20 to 25 iterations is probably high.** Rollouts are 40 + n(6 + 40a), where a is the share of proposals accepted. With a budget of 300, a = 0.1 gives 26 iterations, 0.2 gives 19 and 0.3 gives 14. The real a is unknown until a real run.
+- **Half of a 100-instance train set cannot be baseline failures.** The pool has only 45 failures, and a random val takes about 13 of them.
+
+### Selection noise
+
+A small simulation assumed no candidate is truly better than the seed, a 70/30 mix of easy and hard instances, and the 14.7% flip rate from Step 8d. On 40 val instances, at least one candidate beat the seed in 67%, 75% and 83% of runs with 3, 5 and 8 candidates, with mean gains of 3.5 to 5.8 points. The mix is an assumption, so these figures show the size of the problem and are not estimates. They support the rule that the val score is never reported.
+
+### Decisions
+
+- **Keep GEPA 0.1.4.** The adapter is code we would write anyway, the package has no dependencies, and Stage 12 already defines arm 3 as GEPA. A loop of about 100 lines would probably score about the same, since Pareto selection adds little with 5 or 6 candidates. It was not chosen because the workarounds are small and a home-made optimizer would need its own testing. A problem with resume that a rollout cache cannot cover would reverse this.
+- **Reflection model: `gpt-6.1-sol` at the default `medium` effort,** $2 input and $10 output per 1M tokens on 2026-11-06. `gpt-6.1-terra` ($1 and $5) is the cheaper fallback. `gpt-5.6-terra` ($2 and $12) costs more than sol and is older. Reflection runs about 20 times, so the difference between sol and terra is about $1.50 on an assumed 20k input and 8k output tokens per call. Neither was tested on this task, and the smoke run's proposals are the first real check.
+- **Feedback aims at incomplete fixes.** See below.
+- **Train split:** val stays 40 random with a recorded seed. Train is every remaining baseline failure (about 32) and the same number of random resolved ids.
+- **Keep the 25 dev_25 images.** All 25 ids are in the pool. Disk is no constraint: 708 GiB was free, and about 140 pool images would take very roughly 190 GB. They can go after Step 11d, since Stage 12 uses other instances.
+
+### Evidence for the feedback design
+
+Stage 9 baseline on the pool, which is not arm 2:
+
+| Group | n | Missed a gold-patch file | Median steps (max) | Median lines changed, gold and model |
+|---|---|---|---|---|
+| Resolved | 95 | 9 (9%) | 8 (27) | 5 and 3 |
+| Incomplete (any F2P test fails) | 40 | 16 (40%) | 11 (24) | 12 and 6 |
+| Regression only | 4 | 2 | 6.5 (11) | 7 and 2 |
+| No report | 1 | 0 | 14 | 11 and 3 |
+
+Of the 40 incomplete fixes, 30 passed no F2P test and 10 passed some. The 50-step limit is far from binding. Gold fixes are also larger in the incomplete group, so these instances are partly just harder.
+
+The feedback therefore gives each record a computed label (`incomplete_no_f2p`, `incomplete_partial`, `regression_only` or `other`), full detail only for unresolved instances, failed F2P names, a short excerpt of the failing assertion, and the size of the gold patch with none of its content. Narration counts are left out: 135 of 140 pool instances had a rejected reply, so they would look like the main pattern without separating outcomes. A custom `reflection_prompt_template` states the failure pattern, asks for general workflow guidance and forbids repo or instance facts.
+
+Hidden test names and gold sizes reach only the reflection model, on pool instances. The agent never sees them. Step 8 found that the agent usually could not have run the failing test, so a prompt may not be able to fix much of this. Stage 12 decides.
+
+### Open item
+
+Because ties keep the seed, GEPA can return arm 2's own templates. Step 12b has no rule for arm 3 being identical to arm 2. One is needed before the Stage 12 runs start.
